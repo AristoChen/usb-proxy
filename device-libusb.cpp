@@ -1,0 +1,258 @@
+#include "device-libusb.h"
+
+libusb_device 		**devs;
+libusb_device_handle 	*dev_handle;
+libusb_context 		*context = NULL;
+
+struct libusb_device_descriptor		device_device_desc;
+struct libusb_config_descriptor		**device_config_desc;
+
+int get_descriptor(libusb_device *device) {
+	int result;
+	result = libusb_get_device_descriptor(device, &device_device_desc);
+	if (result != LIBUSB_SUCCESS) {
+		if (verbose_level) {
+			fprintf(stderr, "Error retrieving device descriptor: %s\n",
+					libusb_strerror((libusb_error)result));
+		}
+		return result;
+	}
+
+	device_config_desc = new struct libusb_config_descriptor *[device_device_desc.bNumConfigurations];
+	for (int i = 0; i < device_device_desc.bNumConfigurations; i++) {
+		result = libusb_get_config_descriptor(device, i, &device_config_desc[i]);
+		if (result != LIBUSB_SUCCESS) {
+			if (verbose_level) {
+				fprintf(stderr, "Error retrieving configuration(%d) descriptor: %s\n",
+						i, libusb_strerror((libusb_error)result));
+			}
+			return result;
+		}
+	}
+
+	return LIBUSB_SUCCESS;
+}
+
+int connect_device(int vendor_id, int product_id) {
+	int result;
+	result = libusb_init(&context);
+	if (result < 0) {
+		fprintf(stderr, "Init error: %s\n", libusb_strerror((libusb_error)result));
+		return 1;
+	}
+	libusb_set_debug(context, 3);
+
+	libusb_device **list = NULL;
+	libusb_device *found = NULL;
+
+	int cnt = libusb_get_device_list(context, &list);
+	if (cnt < 0) {
+		if (verbose_level) {
+			fprintf(stderr, "Error retrieving device list: %s\n",
+					libusb_strerror((libusb_error)cnt));
+		}
+		return cnt;
+	}
+
+	while (found == NULL) {
+		cnt = libusb_get_device_list(context, &devs);
+		if (cnt < 0) {
+			fprintf(stderr, "Get Device Error: %s\n",
+					libusb_strerror((libusb_error)cnt));
+			return 1;
+		}
+		if (verbose_level)
+			printf("%d Devices in list\n", cnt);
+
+		for (int i = 0; i < cnt; i++) {
+			libusb_device *dvc = devs[i];
+			result = get_descriptor(dvc);
+			if (result == LIBUSB_SUCCESS) {
+				if (device_device_desc.bDeviceClass != LIBUSB_CLASS_HUB) {
+					if (vendor_id == -1 && product_id == -1) {
+						found = dvc;
+						break;
+					}
+					else if ((vendor_id == device_device_desc.idVendor || vendor_id == LIBUSB_HOTPLUG_MATCH_ANY) &&
+						(product_id == device_device_desc.idProduct || product_id == LIBUSB_HOTPLUG_MATCH_ANY)) {
+						found = dvc;
+						break;
+					}
+				}
+			}
+		}
+
+		if (verbose_level && vendor_id != -1 && product_id != -1)
+			printf("Target device not found\n");
+		libusb_free_device_list(devs, 1);
+		sleep(1);
+	}
+
+	result = libusb_open(found, &dev_handle);
+	if (result != LIBUSB_SUCCESS) {
+		if (verbose_level) {
+			fprintf(stderr, "Error opening device handle: %s\n",
+					libusb_strerror((libusb_error)result));
+		}
+		dev_handle = NULL;
+		libusb_free_device_list(list, 1);
+		return result;
+	}
+
+	result = libusb_set_auto_detach_kernel_driver(dev_handle, 1);
+	if (result != LIBUSB_SUCCESS) {
+		fprintf(stderr, "libusb_set_auto_detach_kernel_driver() failed: %s\n",
+				libusb_strerror((libusb_error)result));
+		return result;
+	}
+
+	//check that device is responsive
+	unsigned char unused[4];
+	result = libusb_get_string_descriptor(dev_handle, 0, 0, unused, sizeof(unused));
+	if (result < 0) {
+		fprintf(stderr, "Device unresponsive: %s\n",
+				libusb_strerror((libusb_error)result));
+		return result;
+	}
+
+	return 0;
+}
+
+void claim_interface(uint8_t interface) {
+	int result = libusb_claim_interface(dev_handle, interface);
+	if (result != LIBUSB_SUCCESS) {
+		fprintf(stderr, "Error claiming interface(%d): %s\n",
+				(unsigned)interface, libusb_strerror((libusb_error)result));
+	}
+}
+
+void release_interface(uint8_t interface) {
+	int result = libusb_release_interface(dev_handle, interface);
+	if (result != LIBUSB_SUCCESS && result != LIBUSB_ERROR_NOT_FOUND) {
+		fprintf(stderr, "Error releasing interface(%d): %s\n",
+				(unsigned)interface, libusb_strerror((libusb_error)result));
+	}
+}
+
+int control_request(const usb_ctrlrequest *setup_packet, int *nbytes,
+			unsigned char **dataptr, int timeout) {
+	int result = libusb_control_transfer(dev_handle,
+					setup_packet->bRequestType, setup_packet->bRequest,
+					setup_packet->wValue, setup_packet->wIndex, *dataptr,
+					setup_packet->wLength, timeout);
+
+	if (result < 0) {
+		if (verbose_level) {
+			fprintf(stderr, "Error sending setup packet: %s\n",
+					libusb_strerror((libusb_error)result));
+		}
+		if (result == LIBUSB_ERROR_PIPE)
+			return -1;
+		else if (result == LIBUSB_ERROR_NO_DEVICE)
+			exit(1);
+		return result;
+	}
+	else {
+		if (verbose_level)
+			printf("Control transfer succeed\n");
+	}
+
+	*nbytes = result;
+	return 0;
+}
+
+void send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,
+			int length) {
+	int transferred;
+	int attempt = 0;
+	int result = LIBUSB_SUCCESS;
+
+	bool incomplete_transfer = false;
+
+	switch (attributes & USB_ENDPOINT_XFERTYPE_MASK) {
+	case USB_ENDPOINT_XFER_CONTROL:
+		fprintf(stderr, "Can't send on a control endpoint.\n");
+		break;
+	case USB_ENDPOINT_XFER_ISOC:
+		fprintf(stderr, "Isochronous endpoints unhandled.\n");
+		break;
+	case USB_ENDPOINT_XFER_BULK:
+		do {
+			result = libusb_bulk_transfer(dev_handle, endpoint, dataptr, length, &transferred, 0);
+			//TODO retry transfer if incomplete
+			if (transferred != length) {
+				fprintf(stderr, "Incomplete Bulk transfer on EP%02x for attempt %d. length(%d), transferred(%d)\n",
+					endpoint, attempt, length, transferred);
+				incomplete_transfer = true;
+			}
+			if (result == LIBUSB_SUCCESS) {
+				if (incomplete_transfer)
+					printf("Resent Bulk transfer on EP%02x for attempt %d. length(%d), transferred(%d)\n",
+						endpoint, attempt, length, transferred);
+				if (verbose_level > 2)
+					printf("Sent %d bytes (Bulk) to EP%02x\n", transferred, endpoint);
+			}
+			if ((result == LIBUSB_ERROR_PIPE || result == LIBUSB_ERROR_TIMEOUT))
+				libusb_clear_halt(dev_handle, endpoint);
+
+			attempt++;
+		} while ((result == LIBUSB_ERROR_PIPE || result == LIBUSB_ERROR_TIMEOUT || transferred != length)
+					&& attempt < MAX_ATTEMPTS);
+		break;
+	case USB_ENDPOINT_XFER_INT:
+		result = libusb_interrupt_transfer(dev_handle, endpoint, dataptr, length, &transferred, 0);
+
+		if (transferred != length)
+			fprintf(stderr, "Incomplete Interrupt transfer on EP%02x\n", endpoint);
+		if (result == LIBUSB_SUCCESS && verbose_level > 2)
+			printf("Sent %d bytes (Int) to libusb EP%02x\n", transferred, endpoint);
+		break;
+	}
+	if (result != LIBUSB_SUCCESS) {
+		fprintf(stderr, "Transfer error sending on EP%02x: %s\n",
+				endpoint, libusb_strerror((libusb_error)result));
+		if (result == LIBUSB_ERROR_NO_DEVICE)
+			exit(1);
+	}
+}
+
+void receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
+			uint8_t **dataptr, int *length, int timeout) {
+	int result = LIBUSB_SUCCESS;
+	timeout = 0;
+
+	int attempt = 0;
+	switch (attributes & USB_ENDPOINT_XFERTYPE_MASK) {
+	case USB_ENDPOINT_XFER_CONTROL:
+		fprintf(stderr, "Can't read on a control endpoint.\n");
+		break;
+	case USB_ENDPOINT_XFER_ISOC:
+		fprintf(stderr, "Isochronous endpoints unhandled.\n");
+		break;
+	case USB_ENDPOINT_XFER_BULK:
+		*dataptr = (uint8_t *) malloc(maxPacketSize * 8);
+		do {
+			result = libusb_bulk_transfer(dev_handle, endpoint, *dataptr, maxPacketSize, length, timeout);
+			if (result == LIBUSB_SUCCESS && verbose_level > 2)
+				printf("received bulk data(%d) bytes\n", *length);
+			if ((result == LIBUSB_ERROR_PIPE || result == LIBUSB_ERROR_TIMEOUT))
+				libusb_clear_halt(dev_handle, endpoint);
+
+			attempt++;
+		} while ((result == LIBUSB_ERROR_PIPE || result == LIBUSB_ERROR_TIMEOUT) && attempt < MAX_ATTEMPTS);
+		break;
+	case USB_ENDPOINT_XFER_INT:
+		*dataptr = (uint8_t *) malloc(maxPacketSize);
+		result = libusb_interrupt_transfer(dev_handle, endpoint, *dataptr, maxPacketSize, length, timeout);
+		if (result == LIBUSB_SUCCESS && verbose_level > 2)
+			printf("received int data(%d) bytes\n", *length);
+		break;
+	}
+
+	if (result != LIBUSB_SUCCESS) {
+		fprintf(stderr, "Transfer error receiving on EP%02x: %s\n",
+				endpoint, libusb_strerror((libusb_error)result));
+		if (result == LIBUSB_ERROR_NO_DEVICE)
+			exit(1);
+	}
+}
