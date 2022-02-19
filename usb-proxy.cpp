@@ -15,9 +15,11 @@ void usage() {
 	printf("\t--device: use specific device\n");
 	printf("\t--driver: use specific driver\n");
 	printf("\t--vendor_id: use specific vendor_id of USB device\n");
-	printf("\t--product_id: use specific product_id of USB device\n");
-	printf("usb-proxy will connect the first USB device it can find if both\n");
-	printf("vendor_id and product_id not specified\n\n");
+	printf("\t--product_id: use specific product_id of USB device\n\n");
+	printf("If `device` not specified, `usb-proxy` will use `dummy_udc.0` as default device\n");
+	printf("If `driver` not specified, `usb-proxy` will use `dummy_udc` as default driver.\n");
+	printf("If both `vendor_id` and `product_id` not specified, `usb-proxy` will connect\n");
+	printf("the first USB device it can find.\n\n");
 	exit(1);
 }
 
@@ -145,13 +147,13 @@ int main(int argc, char **argv)
 		switch (opt) {
 		case 'h':
 			usage();
-			return 1;
+			break;
 		case 'v':
 			verbose_level++;
 			break;
 		case 1:
 			usage();
-			return 1;
+			break;
 		case 2:
 			verbose_level++;
 			break;
