@@ -32,6 +32,22 @@ sudo apt install libusb-1.0-0-dev
 
 ### How to use
 
+Please clone the [raw-gadget](https://github.com/xairy/raw-gadget), and compile the kernel modules(if you need `dummy_hcd` as well, please compile it, otherwise only need to compile `raw-gadget`) in the repo, then load `raw-gadget` kernel module, you will be able to access `/dev/raw-gadget` afterward, then check the name of `device` and `driver` on your hardware with the following command.
+
+```shell
+# For device name
+$ ls /sys/class/udc/
+fe980000.usb
+```
+
+```shell
+# For driver name
+$ cat /sys/class/udc/fe980000.usb/uevent
+USB_UDC_NAME=fe980000.usb
+```
+
+Please replace `fe980000.usb` with the `device` that you have, and then the `driver` is the string after `USB_UDC_NAME=`.
+
 ```
 Usage:
     -h/--help: print this help message
