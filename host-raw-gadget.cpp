@@ -327,12 +327,13 @@ void *ep_loop_write(void *arg) {
 	std::deque<data_queue_info> *data_queue = ep_thread_info.data_queue;
 	std::mutex *data_mutex = ep_thread_info.data_mutex;
 
-	printf("Start writing thread for EP%02x\n", ep.bEndpointAddress);
+	printf("Start writing thread for EP%02x, thread id(%d)\n",
+		ep.bEndpointAddress, gettid());
 
 	while (!please_stop) {
 		assert(ep_num != -1);
 		if (data_queue->size() == 0) {
-			usleep(10);
+			usleep(100);
 			continue;
 		}
 
@@ -359,7 +360,8 @@ void *ep_loop_write(void *arg) {
 		}
 	}
 
-	printf("End writing thread for EP%02x\n", ep.bEndpointAddress);
+	printf("End writing thread for EP%02x, thread id(%d)\n",
+		ep.bEndpointAddress, gettid());
 	return NULL;
 }
 
@@ -373,7 +375,8 @@ void *ep_loop_read(void *arg) {
 	std::deque<data_queue_info> *data_queue = ep_thread_info.data_queue;
 	std::mutex *data_mutex = ep_thread_info.data_mutex;
 
-	printf("Start reading thread for EP%02x\n", ep.bEndpointAddress);
+	printf("Start reading thread for EP%02x, thread id(%d)\n",
+		ep.bEndpointAddress, gettid());
 
 	while (!please_stop) {
 		assert(ep_num != -1);
@@ -384,7 +387,7 @@ void *ep_loop_read(void *arg) {
 			int nbytes = 0;
 
 			if (data_queue->size() >= 32) {
-				usleep(100);
+				usleep(200);
 				continue;
 			}
 
@@ -427,7 +430,8 @@ void *ep_loop_read(void *arg) {
 		}
 	}
 
-	printf("End reading thread for EP%02x\n", ep.bEndpointAddress);
+	printf("End reading thread for EP%02x, thread id(%d)\n",
+		ep.bEndpointAddress, gettid());
 	return NULL;
 }
 
@@ -504,7 +508,7 @@ void process_eps(int fd, int desired_interface) {
 }
 
 void ep0_loop(int fd) {
-	printf("Start for EP0\n");
+	printf("Start for EP0, thread id(%d)\n", gettid());
 	while (!please_stop) {
 		struct usb_raw_control_event event;
 		event.inner.type = 0;
@@ -514,7 +518,7 @@ void ep0_loop(int fd) {
 		log_event((struct usb_raw_event *)&event);
 
 		if (event.inner.length == 4294967295) {
-			printf("End for EP0\n");
+			printf("End for EP0, thread id(%d)\n", gettid());
 			return;
 		}
 
@@ -565,5 +569,5 @@ void ep0_loop(int fd) {
 		delete[] control_data;
 	}
 
-	printf("End for EP0\n");
+	printf("End for EP0, thread id(%d)\n", gettid());
 }
