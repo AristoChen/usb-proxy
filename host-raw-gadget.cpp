@@ -59,6 +59,10 @@ void usb_raw_run(int fd) {
 void usb_raw_event_fetch(int fd, struct usb_raw_event *event) {
 	int rv = ioctl(fd, USB_RAW_IOCTL_EVENT_FETCH, event);
 	if (rv < 0) {
+		if (errno == EINTR) {
+			event->length = 4294967295;
+			return;
+		}
 		perror("ioctl(USB_RAW_IOCTL_EVENT_FETCH)");
 		exit(EXIT_FAILURE);
 	}
@@ -500,6 +504,7 @@ void process_eps(int fd, int desired_interface) {
 }
 
 void ep0_loop(int fd) {
+	printf("Start for EP0\n");
 	while (!please_stop) {
 		struct usb_raw_control_event event;
 		event.inner.type = 0;
@@ -507,6 +512,11 @@ void ep0_loop(int fd) {
 
 		usb_raw_event_fetch(fd, (struct usb_raw_event *)&event);
 		log_event((struct usb_raw_event *)&event);
+
+		if (event.inner.length == 4294967295) {
+			printf("End for EP0\n");
+			return;
+		}
 
 		if (event.inner.type != USB_RAW_EVENT_CONTROL)
 			continue;
@@ -554,4 +564,6 @@ void ep0_loop(int fd) {
 
 		delete[] control_data;
 	}
+
+	printf("End for EP0\n");
 }
