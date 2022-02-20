@@ -1,11 +1,32 @@
 #include "device-libusb.h"
 
-libusb_device 		**devs;
-libusb_device_handle 	*dev_handle;
-libusb_context 		*context = NULL;
+libusb_device 			**devs;
+libusb_device_handle 		*dev_handle;
+libusb_context 			*context = NULL;
+libusb_hotplug_callback_handle	callback_handle = -1;
 
 struct libusb_device_descriptor		device_device_desc;
 struct libusb_config_descriptor		**device_config_desc;
+
+pthread_t hotplug_monitor_thread;
+
+int hotplug_callback(struct libusb_context *ctx __attribute__((unused)),
+			struct libusb_device *dev __attribute__((unused)),
+			libusb_hotplug_event envet __attribute__((unused)),
+			void *user_data __attribute__((unused))) {
+	printf("Hotplug event\n");
+
+	kill(0, SIGINT);
+	return 0;
+}
+
+void *hotplug_monitor(void *arg __attribute__((unused))) {
+	printf("Start hotplug_monitor thread, thread id(%d)\n", gettid());
+	while(true) {
+		usleep(100 * 1000);
+		libusb_handle_events_completed(NULL, NULL);
+	}
+}
 
 int get_descriptor(libusb_device *device) {
 	int result;
@@ -115,6 +136,21 @@ int connect_device(int vendor_id, int product_id) {
 		return result;
 	}
 
+	if (callback_handle == -1) {
+		result = libusb_hotplug_register_callback(context,
+			(libusb_hotplug_event) (LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT),
+			(libusb_hotplug_flag) 0, vendor_id, product_id,
+			LIBUSB_HOTPLUG_MATCH_ANY, hotplug_callback, NULL, &callback_handle);
+
+		if (result != LIBUSB_SUCCESS) {
+			fprintf(stderr, "Error registering callback\n");
+			libusb_exit(context);
+			return result;
+		}
+		pthread_create(&hotplug_monitor_thread, 0,
+			hotplug_monitor, nullptr);
+	}
+
 	return 0;
 }
 
@@ -149,7 +185,7 @@ int control_request(const usb_ctrlrequest *setup_packet, int *nbytes,
 		if (result == LIBUSB_ERROR_PIPE)
 			return -1;
 		else if (result == LIBUSB_ERROR_NO_DEVICE)
-			exit(1);
+			kill(0, SIGINT);
 		return result;
 	}
 	else {
@@ -212,7 +248,7 @@ void send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,
 		fprintf(stderr, "Transfer error sending on EP%02x: %s\n",
 				endpoint, libusb_strerror((libusb_error)result));
 		if (result == LIBUSB_ERROR_NO_DEVICE)
-			exit(1);
+			kill(0, SIGINT);
 	}
 }
 
@@ -253,6 +289,6 @@ void receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 		fprintf(stderr, "Transfer error receiving on EP%02x: %s\n",
 				endpoint, libusb_strerror((libusb_error)result));
 		if (result == LIBUSB_ERROR_NO_DEVICE)
-			exit(1);
+			kill(0, SIGINT);
 	}
 }

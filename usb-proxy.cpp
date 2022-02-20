@@ -1,4 +1,3 @@
-#include <signal.h>
 #include <cstring>
 
 #include "host-raw-gadget.h"
@@ -221,6 +220,16 @@ int main(int argc, char **argv)
 	}
 	delete[] host_config_desc;
 	delete[] device_config_desc;
+
+	release_interface(0);
+
+	if (context && callback_handle != -1) {
+		libusb_hotplug_deregister_callback(context, callback_handle);
+	}
+	if (hotplug_monitor_thread &&
+		pthread_join(hotplug_monitor_thread, NULL)) {
+		fprintf(stderr, "Error join hotplug_monitor_thread\n");
+	}
 
 	return 0;
 }

@@ -4,12 +4,15 @@
 
 #define MAX_ATTEMPTS 5
 
-extern libusb_device		**devs;
-extern libusb_device_handle	*dev_handle;
-extern libusb_context		*context;
+extern libusb_device			**devs;
+extern libusb_device_handle		*dev_handle;
+extern libusb_context			*context;
+extern libusb_hotplug_callback_handle	callback_handle;
 
 extern struct libusb_device_descriptor		device_device_desc;
 extern struct libusb_config_descriptor		**device_config_desc;
+
+extern pthread_t hotplug_monitor_thread;
 
 int connect_device(int vendorId, int productId);
 void claim_interface(uint8_t interface);
