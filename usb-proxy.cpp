@@ -7,6 +7,8 @@
 int verbose_level = 0;
 bool please_stop = false;
 
+int desired_configuration = 1;
+
 void usage() {
 	printf("Usage:\n");
 	printf("\t-h/--help: print this help message\n");
@@ -93,7 +95,6 @@ int setup_host_usb_desc() {
 
 			struct usb_endpoint_descriptor *temp_endpoints =
 				new struct usb_endpoint_descriptor[temp_altsetting.bNumEndpoints];
-			printf("bNumEndpoints is %d\n", temp_altsetting.bNumEndpoints);
 			for (int k = 0; k < temp_altsetting.bNumEndpoints; k++) {
 				struct usb_endpoint_descriptor temp_endpoint = {
 					.bLength =		temp_altsetting.endpoint[k].bLength,

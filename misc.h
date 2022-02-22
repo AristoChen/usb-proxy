@@ -9,3 +9,5 @@
 
 extern int verbose_level;
 extern bool please_stop;
+
+extern int desired_configuration;

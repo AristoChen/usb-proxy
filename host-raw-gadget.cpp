@@ -458,7 +458,8 @@ void process_eps(int fd, int desired_interface) {
 		}
 	}
 
-	struct raw_gadget_interface_descriptor temp_interface = host_config_desc[0].interfaces[desired_interface];
+	struct raw_gadget_interface_descriptor temp_interface =
+		host_config_desc[desired_configuration].interfaces[desired_interface];
 	ep_thread_list = new struct endpoint_thread[temp_interface.interface.bNumEndpoints];
 	printf("bNumEndpoints is %d\n", static_cast<int>(temp_interface.interface.bNumEndpoints));
 
@@ -556,6 +557,13 @@ void ep0_loop(int fd) {
 				printf("ep0: transferred %d bytes (out)\n", rv);
 
 				if (event.ctrl.bRequestType == 0x00 && event.ctrl.bRequest == 0x09) {
+					// Set configuration
+					for (int i = 0; i < host_device_desc.bNumConfigurations; i++) {
+						if (host_config_desc[i].config.bConfigurationValue == event.ctrl.wValue) {
+							desired_configuration = i;
+							printf("Found desired configuration at index: %d\n", i);
+						}
+					}
 					claim_interface(0);
 					process_eps(fd, 0);
 				}
