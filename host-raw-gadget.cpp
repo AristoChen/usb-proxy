@@ -551,26 +551,28 @@ void ep0_loop(int fd) {
 		}
 		else {
 			rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
-			memcpy(control_data, io.data, event.ctrl.wLength);
-			result = control_request(&event.ctrl, &nbytes, &control_data, 1000);
-			if (result == 0) {
-				printf("ep0: transferred %d bytes (out)\n", rv);
 
-				if (event.ctrl.bRequestType == 0x00 && event.ctrl.bRequest == 0x09) {
-					// Set configuration
-					for (int i = 0; i < host_device_desc.bNumConfigurations; i++) {
-						if (host_config_desc[i].config.bConfigurationValue == event.ctrl.wValue) {
-							desired_configuration = i;
-							printf("Found desired configuration at index: %d\n", i);
-						}
+			if (event.ctrl.bRequestType == 0x00 && event.ctrl.bRequest == 0x09) {
+				// Set configuration
+				for (int i = 0; i < host_device_desc.bNumConfigurations; i++) {
+					if (host_config_desc[i].config.bConfigurationValue == event.ctrl.wValue) {
+						desired_configuration = i;
+						printf("Found desired configuration at index: %d\n", i);
 					}
-					claim_interface(0);
-					process_eps(fd, 0);
 				}
+				claim_interface(0);
+				process_eps(fd, 0);
 			}
 			else {
-				printf("ep0: stalling\n");
-				usb_raw_ep0_stall(fd);
+				memcpy(control_data, io.data, event.ctrl.wLength);
+				result = control_request(&event.ctrl, &nbytes, &control_data, 1000);
+				if (result == 0) {
+					printf("ep0: transferred %d bytes (out)\n", rv);
+				}
+				else {
+					printf("ep0: stalling\n");
+					usb_raw_ep0_stall(fd);
+				}
 			}
 		}
 
