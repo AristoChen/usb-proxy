@@ -97,6 +97,15 @@ int usb_raw_ep_enable(int fd, struct usb_endpoint_descriptor *desc) {
 	return rv;
 }
 
+int usb_raw_ep_disable(int fd, uint32_t num) {
+	int rv = ioctl(fd, USB_RAW_IOCTL_EP_DISABLE, num);
+	if (rv < 0) {
+		perror("ioctl(USB_RAW_IOCTL_EP_DISABLE)");
+		exit(EXIT_FAILURE);
+	}
+	return rv;
+}
+
 int usb_raw_ep_read(int fd, struct usb_raw_ep_io *io) {
 	int rv = ioctl(fd, USB_RAW_IOCTL_EP_READ, io);
 	if (rv < 0) {
@@ -330,7 +339,7 @@ void *ep_loop_write(void *arg) {
 	printf("Start writing thread for EP%02x, thread id(%d)\n",
 		ep.bEndpointAddress, gettid());
 
-	while (!please_stop) {
+	while (!please_stop_eps) {
 		assert(ep_num != -1);
 		if (data_queue->size() == 0) {
 			usleep(100);
@@ -378,7 +387,7 @@ void *ep_loop_read(void *arg) {
 	printf("Start reading thread for EP%02x, thread id(%d)\n",
 		ep.bEndpointAddress, gettid());
 
-	while (!please_stop) {
+	while (!please_stop_eps) {
 		assert(ep_num != -1);
 		struct data_queue_info temp_data;
 
@@ -509,8 +518,11 @@ void process_eps(int fd, int desired_interface) {
 }
 
 void ep0_loop(int fd) {
+	bool set_configuration_done_once = false;
+	int previous_bConfigurationValue = -1;
+
 	printf("Start for EP0, thread id(%d)\n", gettid());
-	while (!please_stop) {
+	while (!please_stop_ep0) {
 		struct usb_raw_control_event event;
 		event.inner.type = 0;
 		event.inner.length = sizeof(event.ctrl);
@@ -554,6 +566,37 @@ void ep0_loop(int fd) {
 
 			if (event.ctrl.bRequestType == 0x00 && event.ctrl.bRequest == 0x09) {
 				// Set configuration
+				if (previous_bConfigurationValue == event.ctrl.wValue) {
+					printf("Skip changing configuration, wValue is same as previous\n");
+					continue;
+				}
+
+				if (set_configuration_done_once) {
+					// Need to stop all threads for eps and cleanup
+					printf("Changing configuration\n");
+
+					please_stop_eps = true;
+					release_interface(0);
+
+					int thread_num = host_config_desc[desired_configuration].interfaces[0].interface.bNumEndpoints;
+					for (int i = 0; i < thread_num; i++) {
+						if (ep_thread_list[i].ep_thread_read &&
+							pthread_join(ep_thread_list[i].ep_thread_read, NULL)) {
+							fprintf(stderr, "Error join ep_thread_read\n");
+						}
+						if (ep_thread_list[i].ep_thread_write &&
+							pthread_join(ep_thread_list[i].ep_thread_write, NULL)) {
+							fprintf(stderr, "Error join ep_thread_write\n");
+						}
+
+						usb_raw_ep_disable(fd, ep_thread_list[i].ep_thread_info.ep_num);
+					}
+
+					set_configuration(event.ctrl.wValue);
+
+					please_stop_eps = false;
+				}
+
 				for (int i = 0; i < host_device_desc.bNumConfigurations; i++) {
 					if (host_config_desc[i].config.bConfigurationValue == event.ctrl.wValue) {
 						desired_configuration = i;
@@ -562,6 +605,9 @@ void ep0_loop(int fd) {
 				}
 				claim_interface(0);
 				process_eps(fd, 0);
+
+				set_configuration_done_once = true;
+				previous_bConfigurationValue = event.ctrl.wValue;
 			}
 			else {
 				memcpy(control_data, io.data, event.ctrl.wLength);

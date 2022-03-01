@@ -8,6 +8,7 @@
 #include <linux/usb/ch9.h>
 
 extern int verbose_level;
-extern bool please_stop;
+extern bool please_stop_ep0;
+extern bool please_stop_eps;
 
 extern int desired_configuration;

@@ -154,6 +154,14 @@ int connect_device(int vendor_id, int product_id) {
 	return 0;
 }
 
+void set_configuration(int configuration) {
+	int result = libusb_set_configuration(dev_handle, configuration);
+	if (result != LIBUSB_SUCCESS) {
+		fprintf(stderr, "Error setting configuration(%d): %s\n",
+				configuration, libusb_strerror((libusb_error)result));
+	}
+}
+
 void claim_interface(uint8_t interface) {
 	int result = libusb_claim_interface(dev_handle, interface);
 	if (result != LIBUSB_SUCCESS) {
@@ -184,8 +192,6 @@ int control_request(const usb_ctrlrequest *setup_packet, int *nbytes,
 		}
 		if (result == LIBUSB_ERROR_PIPE)
 			return -1;
-		else if (result == LIBUSB_ERROR_NO_DEVICE)
-			kill(0, SIGINT);
 		return result;
 	}
 	else {
@@ -247,8 +253,6 @@ void send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,
 	if (result != LIBUSB_SUCCESS) {
 		fprintf(stderr, "Transfer error sending on EP%02x: %s\n",
 				endpoint, libusb_strerror((libusb_error)result));
-		if (result == LIBUSB_ERROR_NO_DEVICE)
-			kill(0, SIGINT);
 	}
 }
 
@@ -288,7 +292,5 @@ void receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 	if (result != LIBUSB_SUCCESS) {
 		fprintf(stderr, "Transfer error receiving on EP%02x: %s\n",
 				endpoint, libusb_strerror((libusb_error)result));
-		if (result == LIBUSB_ERROR_NO_DEVICE)
-			kill(0, SIGINT);
 	}
 }

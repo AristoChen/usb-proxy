@@ -15,6 +15,7 @@ extern struct libusb_config_descriptor		**device_config_desc;
 extern pthread_t hotplug_monitor_thread;
 
 int connect_device(int vendorId, int productId);
+void set_configuration(int configuration);
 void claim_interface(uint8_t interface);
 void release_interface(uint8_t interface);
 int control_request(const usb_ctrlrequest *setup_packet, int *nbytes,

@@ -5,7 +5,8 @@
 #include "misc.h"
 
 int verbose_level = 0;
-bool please_stop = false;
+bool please_stop_ep0 = false;
+bool please_stop_eps = false;
 
 int desired_configuration = 1;
 
@@ -39,7 +40,8 @@ void handle_signal(int signum) {
 			printf("Received SIGINT, stopping...\n");
 
 		signal_received = true;
-		please_stop = true;
+		please_stop_ep0 = true;
+		please_stop_eps = true;
 		break;
 	}
 }
@@ -75,6 +77,11 @@ int setup_host_usb_desc() {
 			.bMaxPower =		device_config_desc[i]->MaxPower,
 		};
 		host_config_desc[i].config = temp_config;
+
+		// Set the first bConfigurationValue as default desired_configuration
+		// assuming that the first configuration will be set first
+		if (i == 0)
+			desired_configuration = i;
 
 		struct raw_gadget_interface_descriptor *temp_interfaces =
 			new struct raw_gadget_interface_descriptor[device_config_desc[i]->interface->num_altsetting];
@@ -194,7 +201,7 @@ int main(int argc, char **argv)
 
 	ep0_loop(fd);
 
-	int thread_num = host_config_desc[0].interfaces[0].interface.bNumEndpoints;
+	int thread_num = host_config_desc[desired_configuration].interfaces[0].interface.bNumEndpoints;
 	for (int i = 0; i < thread_num; i++) {
 		if (ep_thread_list[i].ep_thread_read &&
 			pthread_join(ep_thread_list[i].ep_thread_read, NULL)) {
