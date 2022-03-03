@@ -84,9 +84,9 @@ int setup_host_usb_desc() {
 			desired_configuration = i;
 
 		struct raw_gadget_interface_descriptor *temp_interfaces =
-			new struct raw_gadget_interface_descriptor[device_config_desc[i]->interface->num_altsetting];
-		for (int j = 0; j < device_config_desc[i]->interface->num_altsetting; j++) {
-			const struct libusb_interface_descriptor temp_altsetting = device_config_desc[i]->interface->altsetting[j];
+			new struct raw_gadget_interface_descriptor[device_config_desc[i]->bNumInterfaces];
+		for (int j = 0; j < device_config_desc[i]->bNumInterfaces; j++) {
+			const struct libusb_interface_descriptor temp_altsetting = device_config_desc[i]->interface[j].altsetting[0];
 			struct usb_interface_descriptor temp_interface = {
 				.bLength =		temp_altsetting.bLength,
 				.bDescriptorType =	temp_altsetting.bDescriptorType,
