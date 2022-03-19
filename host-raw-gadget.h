@@ -87,9 +87,14 @@ struct raw_gadget_interface_descriptor {
 	struct usb_endpoint_descriptor		*endpoints;
 };
 
+struct raw_gadget_interface {
+	struct raw_gadget_interface_descriptor	*altsetting;
+	int					num_altsetting;
+};
+
 struct raw_gadget_config_descriptor {
 	struct usb_config_descriptor		config;
-	struct raw_gadget_interface_descriptor	*interfaces;
+	struct raw_gadget_interface		*interfaces;
 };
 
 extern struct usb_device_descriptor 		host_device_desc;

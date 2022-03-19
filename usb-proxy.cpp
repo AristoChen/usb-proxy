@@ -64,8 +64,9 @@ int setup_host_usb_desc() {
 		.bNumConfigurations =	device_device_desc.bNumConfigurations,
 	};
 
-	host_config_desc = new struct raw_gadget_config_descriptor[host_device_desc.bNumConfigurations];
-	for (int i = 0; i < device_device_desc.bNumConfigurations; i++) {
+	int bNumConfigurations = device_device_desc.bNumConfigurations;
+	host_config_desc = new struct raw_gadget_config_descriptor[bNumConfigurations];
+	for (int i = 0; i < bNumConfigurations; i++) {
 		struct usb_config_descriptor temp_config = {
 			.bLength =		device_config_desc[i]->bLength,
 			.bDescriptorType =	device_config_desc[i]->bDescriptorType,
@@ -83,39 +84,55 @@ int setup_host_usb_desc() {
 		if (i == 0)
 			desired_configuration = i;
 
-		struct raw_gadget_interface_descriptor *temp_interfaces =
-			new struct raw_gadget_interface_descriptor[device_config_desc[i]->bNumInterfaces];
-		for (int j = 0; j < device_config_desc[i]->bNumInterfaces; j++) {
-			const struct libusb_interface_descriptor temp_altsetting = device_config_desc[i]->interface[j].altsetting[0];
-			struct usb_interface_descriptor temp_interface = {
-				.bLength =		temp_altsetting.bLength,
-				.bDescriptorType =	temp_altsetting.bDescriptorType,
-				.bInterfaceNumber =	temp_altsetting.bInterfaceNumber,
-				.bAlternateSetting =	temp_altsetting.bAlternateSetting,
-				.bNumEndpoints =	temp_altsetting.bNumEndpoints,
-				.bInterfaceClass =	temp_altsetting.bInterfaceClass,
-				.bInterfaceSubClass =	temp_altsetting.bInterfaceSubClass,
-				.bInterfaceProtocol =	temp_altsetting.bInterfaceProtocol,
-				.iInterface =		temp_altsetting.iInterface,
-			};
-			temp_interfaces[j].interface = temp_interface;
-
-			struct usb_endpoint_descriptor *temp_endpoints =
-				new struct usb_endpoint_descriptor[temp_altsetting.bNumEndpoints];
-			for (int k = 0; k < temp_altsetting.bNumEndpoints; k++) {
-				struct usb_endpoint_descriptor temp_endpoint = {
-					.bLength =		temp_altsetting.endpoint[k].bLength,
-					.bDescriptorType =	temp_altsetting.endpoint[k].bDescriptorType,
-					.bEndpointAddress =	temp_altsetting.endpoint[k].bEndpointAddress,
-					.bmAttributes =		temp_altsetting.endpoint[k].bmAttributes,
-					.wMaxPacketSize =	temp_altsetting.endpoint[k].wMaxPacketSize,
-					.bInterval =		temp_altsetting.endpoint[k].bInterval,
-					.bRefresh =		temp_altsetting.endpoint[k].bRefresh,
-					.bSynchAddress = 	temp_altsetting.endpoint[k].bSynchAddress,
+		int bNumInterfaces = device_config_desc[i]->bNumInterfaces;
+		struct raw_gadget_interface *temp_interfaces =
+			new struct raw_gadget_interface[bNumInterfaces];
+		for (int j = 0; j < bNumInterfaces; j++) {
+			int num_altsetting = device_config_desc[i]->interface[j].num_altsetting;
+			struct raw_gadget_interface_descriptor *temp_altsettings =
+				new struct raw_gadget_interface_descriptor[num_altsetting];
+			for (int k = 0; k < num_altsetting; k++) {
+				const struct libusb_interface_descriptor temp_device_altsetting =
+					device_config_desc[i]->interface[j].altsetting[k];
+				struct usb_interface_descriptor temp_host_altsetting = {
+					.bLength =		temp_device_altsetting.bLength,
+					.bDescriptorType =	temp_device_altsetting.bDescriptorType,
+					.bInterfaceNumber =	temp_device_altsetting.bInterfaceNumber,
+					.bAlternateSetting =	temp_device_altsetting.bAlternateSetting,
+					.bNumEndpoints =	temp_device_altsetting.bNumEndpoints,
+					.bInterfaceClass =	temp_device_altsetting.bInterfaceClass,
+					.bInterfaceSubClass =	temp_device_altsetting.bInterfaceSubClass,
+					.bInterfaceProtocol =	temp_device_altsetting.bInterfaceProtocol,
+					.iInterface =		temp_device_altsetting.iInterface,
 				};
-				temp_endpoints[k] = temp_endpoint;
+				temp_altsettings[k].interface = temp_host_altsetting;
+
+				if (!temp_device_altsetting.bNumEndpoints) {
+					printf("InterfaceNumber %x AlternateSetting %x has no endpoint, skip\n",
+						temp_device_altsetting.bInterfaceNumber,
+						temp_device_altsetting.bAlternateSetting);
+					continue;
+				}
+
+				int bNumEndpoints = temp_device_altsetting.bNumEndpoints;
+				struct usb_endpoint_descriptor *temp_endpoints =
+					new struct usb_endpoint_descriptor[bNumEndpoints];
+				for (int l = 0; l < bNumEndpoints; l++) {
+					struct usb_endpoint_descriptor temp_endpoint = {
+						.bLength =		temp_device_altsetting.endpoint[l].bLength,
+						.bDescriptorType =	temp_device_altsetting.endpoint[l].bDescriptorType,
+						.bEndpointAddress =	temp_device_altsetting.endpoint[l].bEndpointAddress,
+						.bmAttributes =		temp_device_altsetting.endpoint[l].bmAttributes,
+						.wMaxPacketSize =	temp_device_altsetting.endpoint[l].wMaxPacketSize,
+						.bInterval =		temp_device_altsetting.endpoint[l].bInterval,
+						.bRefresh =		temp_device_altsetting.endpoint[l].bRefresh,
+						.bSynchAddress = 	temp_device_altsetting.endpoint[l].bSynchAddress,
+					};
+					temp_endpoints[l] = temp_endpoint;
+				}
+				temp_altsettings[k].endpoints = temp_endpoints;
 			}
-			temp_interfaces[j].endpoints = temp_endpoints;
+			temp_interfaces[j].altsetting = temp_altsettings;
 		}
 		host_config_desc[i].interfaces = temp_interfaces;
 	}
@@ -201,7 +218,8 @@ int main(int argc, char **argv)
 
 	ep0_loop(fd);
 
-	int thread_num = host_config_desc[desired_configuration].interfaces[0].interface.bNumEndpoints;
+	int thread_num =
+		host_config_desc[desired_configuration].interfaces[0].altsetting[0].interface.bNumEndpoints;
 	for (int i = 0; i < thread_num; i++) {
 		if (ep_thread_list[i].ep_thread_read &&
 			pthread_join(ep_thread_list[i].ep_thread_read, NULL)) {
@@ -219,12 +237,17 @@ int main(int argc, char **argv)
 
 	close(fd);
 
-	for (int i = 0; i < host_device_desc.bNumConfigurations; i++) {
-		for (int j = 0; j < device_config_desc[i]->interface->num_altsetting; j++) {
-			for (int k = 0; k < device_config_desc[i]->interface->altsetting[j].bNumEndpoints; k++)
-				delete[] host_config_desc[i].interfaces[j].endpoints;
-			delete[] host_config_desc[i].interfaces;
+	int bNumConfigurations = device_device_desc.bNumConfigurations;
+	for (int i = 0; i < bNumConfigurations; i++) {
+		int bNumInterfaces = device_config_desc[i]->bNumInterfaces;
+		for (int j = 0; j < bNumInterfaces; j++) {
+			int num_altsetting = device_config_desc[i]->interface[j].num_altsetting;
+			for (int k = 0; k < num_altsetting; k++) {
+				delete[] host_config_desc[i].interfaces[j].altsetting[k].endpoints;
+			}
+			delete[] host_config_desc[i].interfaces[j].altsetting;
 		}
+		delete[] host_config_desc[i].interfaces;
 	}
 	delete[] host_config_desc;
 	delete[] device_config_desc;

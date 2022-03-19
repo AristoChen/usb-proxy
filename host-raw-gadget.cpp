@@ -468,7 +468,7 @@ void process_eps(int fd, int desired_interface) {
 	}
 
 	struct raw_gadget_interface_descriptor temp_interface =
-		host_config_desc[desired_configuration].interfaces[desired_interface];
+		host_config_desc[desired_configuration].interfaces[desired_interface].altsetting[0];
 	ep_thread_list = new struct endpoint_thread[temp_interface.interface.bNumEndpoints];
 	printf("bNumEndpoints is %d\n", static_cast<int>(temp_interface.interface.bNumEndpoints));
 
@@ -578,7 +578,8 @@ void ep0_loop(int fd) {
 					please_stop_eps = true;
 					release_interface(0);
 
-					int thread_num = host_config_desc[desired_configuration].interfaces[0].interface.bNumEndpoints;
+					int thread_num =
+						host_config_desc[desired_configuration].interfaces[0].altsetting[0].interface.bNumEndpoints;
 					for (int i = 0; i < thread_num; i++) {
 						if (ep_thread_list[i].ep_thread_read &&
 							pthread_join(ep_thread_list[i].ep_thread_read, NULL)) {
