@@ -88,18 +88,20 @@ int connect_device(int vendor_id, int product_id) {
 		for (int i = 0; i < cnt; i++) {
 			libusb_device *dvc = devs[i];
 			result = get_descriptor(dvc);
-			if (result == LIBUSB_SUCCESS) {
-				if (device_device_desc.bDeviceClass != LIBUSB_CLASS_HUB) {
-					if (vendor_id == -1 && product_id == -1) {
-						found = dvc;
-						break;
-					}
-					else if ((vendor_id == device_device_desc.idVendor || vendor_id == LIBUSB_HOTPLUG_MATCH_ANY) &&
-						(product_id == device_device_desc.idProduct || product_id == LIBUSB_HOTPLUG_MATCH_ANY)) {
-						found = dvc;
-						break;
-					}
-				}
+			if (result != LIBUSB_SUCCESS)
+				continue;
+
+			if (device_device_desc.bDeviceClass == LIBUSB_CLASS_HUB)
+				continue;
+
+			if (vendor_id == -1 && product_id == -1) {
+				found = dvc;
+				break;
+			}
+			else if ((vendor_id == device_device_desc.idVendor || vendor_id == LIBUSB_HOTPLUG_MATCH_ANY) &&
+				(product_id == device_device_desc.idProduct || product_id == LIBUSB_HOTPLUG_MATCH_ANY)) {
+				found = dvc;
+				break;
 			}
 		}
 
@@ -216,7 +218,8 @@ void send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,
 		fprintf(stderr, "Can't send on a control endpoint.\n");
 		break;
 	case USB_ENDPOINT_XFER_ISOC:
-		fprintf(stderr, "Isochronous endpoints unhandled.\n");
+		if (verbose_level)
+			fprintf(stderr, "Isochronous(write) endpoint EP%02x unhandled.\n", endpoint);
 		break;
 	case USB_ENDPOINT_XFER_BULK:
 		do {
@@ -267,14 +270,15 @@ void receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 		fprintf(stderr, "Can't read on a control endpoint.\n");
 		break;
 	case USB_ENDPOINT_XFER_ISOC:
-		fprintf(stderr, "Isochronous endpoints unhandled.\n");
+		if (verbose_level)
+			fprintf(stderr, "Isochronous(read) endpoint EP%02x unhandled.\n", endpoint);
 		break;
 	case USB_ENDPOINT_XFER_BULK:
 		*dataptr = (uint8_t *) malloc(maxPacketSize * 8);
 		do {
 			result = libusb_bulk_transfer(dev_handle, endpoint, *dataptr, maxPacketSize, length, timeout);
 			if (result == LIBUSB_SUCCESS && verbose_level > 2)
-				printf("received bulk data(%d) bytes\n", *length);
+				printf("Received bulk data(%d) bytes\n", *length);
 			if ((result == LIBUSB_ERROR_PIPE || result == LIBUSB_ERROR_TIMEOUT))
 				libusb_clear_halt(dev_handle, endpoint);
 
@@ -285,7 +289,7 @@ void receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 		*dataptr = (uint8_t *) malloc(maxPacketSize);
 		result = libusb_interrupt_transfer(dev_handle, endpoint, *dataptr, maxPacketSize, length, timeout);
 		if (result == LIBUSB_SUCCESS && verbose_level > 2)
-			printf("received int data(%d) bytes\n", *length);
+			printf("Received int data(%d) bytes\n", *length);
 		break;
 	}
 

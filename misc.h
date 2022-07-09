@@ -12,3 +12,5 @@ extern bool please_stop_ep0;
 extern bool please_stop_eps;
 
 extern int desired_configuration;
+extern int desired_interface;
+extern int desired_interface_altsetting;

@@ -9,6 +9,8 @@ bool please_stop_ep0 = false;
 bool please_stop_eps = false;
 
 int desired_configuration = 1;
+int desired_interface = 0;
+int desired_interface_altsetting = 0;
 
 void usage() {
 	printf("Usage:\n");
@@ -218,8 +220,11 @@ int main(int argc, char **argv)
 
 	ep0_loop(fd);
 
-	int thread_num =
-		host_config_desc[desired_configuration].interfaces[0].altsetting[0].interface.bNumEndpoints;
+	int thread_num = host_config_desc[desired_configuration]
+			 .interfaces[desired_interface]
+			 .altsetting[desired_interface_altsetting]
+			 .interface
+			 .bNumEndpoints;
 	for (int i = 0; i < thread_num; i++) {
 		if (ep_thread_list[i].ep_thread_read &&
 			pthread_join(ep_thread_list[i].ep_thread_read, NULL)) {

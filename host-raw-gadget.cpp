@@ -352,7 +352,7 @@ void *ep_loop_write(void *arg) {
 		data_mutex->unlock();
 		struct usb_raw_transfer_io io = temp_data.io;
 
-		if (ep.bEndpointAddress & 0x80) {
+		if (ep.bEndpointAddress & USB_DIR_IN) {
 			int rv = usb_raw_ep_write(fd, (struct usb_raw_ep_io *)&io);
 			if (rv >= 0) {
 				printf("EP%x(%s_%s): wrote %d bytes to host\n", ep.bEndpointAddress,
@@ -365,7 +365,8 @@ void *ep_loop_write(void *arg) {
 			memcpy(data, io.data, length);
 			send_data(ep.bEndpointAddress, ep.bmAttributes, data, length);
 
-			delete[] data;
+			if (data)
+				delete[] data;
 		}
 	}
 
@@ -391,8 +392,8 @@ void *ep_loop_read(void *arg) {
 		assert(ep_num != -1);
 		struct data_queue_info temp_data;
 
-		if (ep.bEndpointAddress & 0x80) {
-			unsigned char *data;
+		if (ep.bEndpointAddress & USB_DIR_IN) {
+			unsigned char *data = NULL;
 			int nbytes = 0;
 
 			if (data_queue->size() >= 32) {
@@ -402,7 +403,7 @@ void *ep_loop_read(void *arg) {
 
 			receive_data(ep.bEndpointAddress, ep.bmAttributes, ep.wMaxPacketSize, &data, &nbytes, 0);
 
-			if (nbytes >= 0) {
+			if (nbytes > 0) { // Not sure if we should enqueue data if nbytes == 0
 				memcpy(temp_data.io.data, data, nbytes);
 				temp_data.io.inner.ep = ep_num;
 				temp_data.io.inner.flags = 0;
@@ -416,7 +417,9 @@ void *ep_loop_read(void *arg) {
 					printf("EP%x(%s_%s): enqueued %d bytes to queue\n", ep.bEndpointAddress,
 							transfer_type.c_str(), dir.c_str(), nbytes);
 			}
-			delete[] data;
+
+			if (data)
+				delete[] data;
 		}
 		else {
 			temp_data.io.inner.ep = ep_num;
@@ -444,7 +447,7 @@ void *ep_loop_read(void *arg) {
 	return NULL;
 }
 
-void process_eps(int fd, int desired_interface) {
+void process_eps(int fd) {
 	struct usb_raw_eps_info info;
 	memset(&info, 0, sizeof(info));
 
@@ -467,8 +470,9 @@ void process_eps(int fd, int desired_interface) {
 		}
 	}
 
-	struct raw_gadget_interface_descriptor temp_interface =
-		host_config_desc[desired_configuration].interfaces[desired_interface].altsetting[0];
+	struct raw_gadget_interface_descriptor temp_interface = host_config_desc[desired_configuration]
+								.interfaces[desired_interface]
+								.altsetting[desired_interface_altsetting];
 	ep_thread_list = new struct endpoint_thread[temp_interface.interface.bNumEndpoints];
 	printf("bNumEndpoints is %d\n", static_cast<int>(temp_interface.interface.bNumEndpoints));
 
@@ -482,6 +486,9 @@ void process_eps(int fd, int desired_interface) {
 		ep_thread_list[i].ep_thread_info.data_mutex = new std::mutex;
 
 		switch (usb_endpoint_type(&temp_interface.endpoints[i])) {
+		case USB_ENDPOINT_XFER_ISOC:
+			ep_thread_list[i].ep_thread_info.transfer_type = "isoc";
+			break;
 		case USB_ENDPOINT_XFER_BULK:
 			ep_thread_list[i].ep_thread_info.transfer_type = "bulk";
 			break;
@@ -489,7 +496,7 @@ void process_eps(int fd, int desired_interface) {
 			ep_thread_list[i].ep_thread_info.transfer_type = "int";
 			break;
 		default:
-			printf("transfer_type is: %d\n", usb_endpoint_type(&temp_interface.endpoints[i]));
+			printf("transfer_type %d is invalid\n", usb_endpoint_type(&temp_interface.endpoints[i]));
 			assert(false);
 		}
 
@@ -520,6 +527,8 @@ void process_eps(int fd, int desired_interface) {
 void ep0_loop(int fd) {
 	bool set_configuration_done_once = false;
 	int previous_bConfigurationValue = -1;
+	int previous_interface = 0;
+	int previous_interface_altsetting = 0;
 
 	printf("Start for EP0, thread id(%d)\n", gettid());
 	while (!please_stop_ep0) {
@@ -576,10 +585,15 @@ void ep0_loop(int fd) {
 					printf("Changing configuration\n");
 
 					please_stop_eps = true;
-					release_interface(0);
+					desired_interface = 0;
+					desired_interface_altsetting = 0;
+					release_interface(desired_interface);
 
-					int thread_num =
-						host_config_desc[desired_configuration].interfaces[0].altsetting[0].interface.bNumEndpoints;
+					int thread_num = host_config_desc[desired_configuration]
+							 .interfaces[desired_interface]
+							 .altsetting[desired_interface_altsetting]
+							 .interface
+							 .bNumEndpoints;
 					for (int i = 0; i < thread_num; i++) {
 						if (ep_thread_list[i].ep_thread_read &&
 							pthread_join(ep_thread_list[i].ep_thread_read, NULL)) {
@@ -592,6 +606,7 @@ void ep0_loop(int fd) {
 
 						usb_raw_ep_disable(fd, ep_thread_list[i].ep_thread_info.ep_num);
 					}
+					delete[] ep_thread_list;
 
 					set_configuration(event.ctrl.wValue);
 
@@ -604,11 +619,64 @@ void ep0_loop(int fd) {
 						printf("Found desired configuration at index: %d\n", i);
 					}
 				}
-				claim_interface(0);
-				process_eps(fd, 0);
+				claim_interface(desired_interface);
+				process_eps(fd);
 
 				set_configuration_done_once = true;
 				previous_bConfigurationValue = event.ctrl.wValue;
+			}
+			else if (event.ctrl.bRequestType == 0x01 && event.ctrl.bRequest == 0x0b) {
+				// Set interface/alt_setting
+				bool process_eps_required = false;
+				desired_interface = event.ctrl.wIndex;
+				desired_interface_altsetting = event.ctrl.wValue;
+
+				if (previous_interface != desired_interface) {
+					printf("Will change interface from %d to %d\n",
+						previous_interface, desired_interface);
+					release_interface(previous_interface);
+					process_eps_required = true;
+				}
+				if (previous_interface_altsetting != desired_interface_altsetting) {
+					printf("Will Change alt_setting from %d to %d\n",
+						previous_interface_altsetting, desired_interface_altsetting);
+					process_eps_required = true;
+				}
+
+				if (process_eps_required) {
+					// Need to stop all threads for eps and cleanup
+					printf("Changing interface/altsetting\n");
+
+					please_stop_eps = true;
+
+					int thread_num = host_config_desc[desired_configuration]
+							 .interfaces[previous_interface]
+							 .altsetting[previous_interface_altsetting]
+							 .interface
+							 .bNumEndpoints;
+					for (int i = 0; i < thread_num; i++) {
+						if (ep_thread_list[i].ep_thread_read &&
+							pthread_join(ep_thread_list[i].ep_thread_read, NULL)) {
+							fprintf(stderr, "Error join ep_thread_read\n");
+						}
+						if (ep_thread_list[i].ep_thread_write &&
+							pthread_join(ep_thread_list[i].ep_thread_write, NULL)) {
+							fprintf(stderr, "Error join ep_thread_write\n");
+						}
+
+						usb_raw_ep_disable(fd, ep_thread_list[i].ep_thread_info.ep_num);
+					}
+					delete[] ep_thread_list;
+
+					please_stop_eps = false;
+
+					if (previous_interface != desired_interface)
+						claim_interface(desired_interface);
+					process_eps(fd);
+				}
+
+				previous_interface = desired_interface;
+				previous_interface_altsetting = desired_interface_altsetting;
 			}
 			else {
 				memcpy(control_data, io.data, event.ctrl.wLength);
