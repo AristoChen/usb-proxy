@@ -260,15 +260,18 @@ void ep0_loop(int fd) {
 		else {
 			rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
 
-			if (event.ctrl.bRequestType == 0x00 && event.ctrl.bRequest == 0x09) {
-				// Set configuration
+			if (event.ctrl.bRequestType == 0x00 && event.ctrl.bRequest == 0x09) { // Set configuration
 				if (previous_bConfigurationValue == event.ctrl.wValue) {
 					printf("Skip changing configuration, wValue is same as previous\n");
 					continue;
 				}
 
-				if (set_configuration_done_once) {
-					// Need to stop all threads for eps and cleanup
+				if (event.ctrl.wValue > host_device_desc.bNumConfigurations) {
+					printf("[Warning] Skip changing configuration, wValue(%d) is invalid\n", event.ctrl.wValue);
+					continue;
+				}
+
+				if (set_configuration_done_once) { // Need to stop all threads for eps and cleanup
 					printf("Changing configuration\n");
 
 					desired_interface = 0;
@@ -293,9 +296,19 @@ void ep0_loop(int fd) {
 				previous_interface = desired_interface;
 				previous_interface_altsetting = desired_interface_altsetting;
 			}
-			else if (event.ctrl.bRequestType == 0x01 && event.ctrl.bRequest == 0x0b) {
-				// Set interface/alt_setting
+			else if (event.ctrl.bRequestType == 0x01 && event.ctrl.bRequest == 0x0b) { // Set interface/alt_setting
 				bool process_eps_required = false;
+
+				if (event.ctrl.wIndex >= host_config_desc[desired_configuration].config.bNumInterfaces) {
+					printf("[Warning] Skip changing interface, wIndex(%d) is invalid\n", event.ctrl.wIndex);
+					continue;
+				}
+				if (event.ctrl.wValue >= host_config_desc[desired_configuration]
+							.interfaces[event.ctrl.wIndex].num_altsetting) {
+					printf("[Warning] Skip changing alt_setting, wValue(%d) is invalid\n", event.ctrl.wValue);
+					continue;
+				}
+
 				desired_interface = event.ctrl.wIndex;
 				desired_interface_altsetting = event.ctrl.wValue;
 
@@ -311,8 +324,7 @@ void ep0_loop(int fd) {
 					process_eps_required = true;
 				}
 
-				if (process_eps_required) {
-					// Need to stop all threads for eps and cleanup
+				if (process_eps_required) { // Need to stop all threads for eps and cleanup
 					printf("Changing interface/altsetting\n");
 
 					terminate_eps(fd, previous_interface, previous_interface_altsetting);

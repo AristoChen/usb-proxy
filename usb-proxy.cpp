@@ -134,6 +134,7 @@ int setup_host_usb_desc() {
 				temp_altsettings[k].endpoints = temp_endpoints;
 			}
 			temp_interfaces[j].altsetting = temp_altsettings;
+			temp_interfaces[j].num_altsetting = device_config_desc[i]->interface[j].num_altsetting;
 		}
 		host_config_desc[i].interfaces = temp_interfaces;
 	}
