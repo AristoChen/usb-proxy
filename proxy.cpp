@@ -178,6 +178,35 @@ void process_eps(int fd) {
 	printf("process_eps done\n");
 }
 
+void terminate_eps(int fd, int interface, int altsetting) {
+	int thread_num = host_config_desc[desired_configuration]
+			.interfaces[interface]
+			.altsetting[altsetting]
+			.interface
+			.bNumEndpoints;
+
+	please_stop_eps = true;
+
+	for (int i = 0; i < thread_num; i++) {
+		if (ep_thread_list[i].ep_thread_read &&
+			pthread_join(ep_thread_list[i].ep_thread_read, NULL)) {
+			fprintf(stderr, "Error join ep_thread_read\n");
+		}
+		if (ep_thread_list[i].ep_thread_write &&
+			pthread_join(ep_thread_list[i].ep_thread_write, NULL)) {
+			fprintf(stderr, "Error join ep_thread_write\n");
+		}
+
+		usb_raw_ep_disable(fd, ep_thread_list[i].ep_thread_info.ep_num);
+
+		delete ep_thread_list[i].ep_thread_info.data_queue;
+		delete ep_thread_list[i].ep_thread_info.data_mutex;
+	}
+	delete[] ep_thread_list;
+
+	please_stop_eps = false;
+}
+
 void ep0_loop(int fd) {
 	bool set_configuration_done_once = false;
 	int previous_bConfigurationValue = -1;
@@ -242,39 +271,18 @@ void ep0_loop(int fd) {
 					// Need to stop all threads for eps and cleanup
 					printf("Changing configuration\n");
 
-					please_stop_eps = true;
 					desired_interface = 0;
 					desired_interface_altsetting = 0;
 					release_interface(desired_interface);
 
-					int thread_num = host_config_desc[desired_configuration]
-							 .interfaces[desired_interface]
-							 .altsetting[desired_interface_altsetting]
-							 .interface
-							 .bNumEndpoints;
-					for (int i = 0; i < thread_num; i++) {
-						if (ep_thread_list[i].ep_thread_read &&
-							pthread_join(ep_thread_list[i].ep_thread_read, NULL)) {
-							fprintf(stderr, "Error join ep_thread_read\n");
-						}
-						if (ep_thread_list[i].ep_thread_write &&
-							pthread_join(ep_thread_list[i].ep_thread_write, NULL)) {
-							fprintf(stderr, "Error join ep_thread_write\n");
-						}
-
-						usb_raw_ep_disable(fd, ep_thread_list[i].ep_thread_info.ep_num);
-					}
-					delete[] ep_thread_list;
+					terminate_eps(fd, previous_interface, previous_interface_altsetting);
 
 					set_configuration(event.ctrl.wValue);
-
-					please_stop_eps = false;
 				}
 
 				for (int i = 0; i < host_device_desc.bNumConfigurations; i++) {
 					if (host_config_desc[i].config.bConfigurationValue == event.ctrl.wValue) {
 						desired_configuration = i;
-						printf("Found desired configuration at index: %d\n", i);
 					}
 				}
 				claim_interface(desired_interface);
@@ -282,6 +290,8 @@ void ep0_loop(int fd) {
 
 				set_configuration_done_once = true;
 				previous_bConfigurationValue = event.ctrl.wValue;
+				previous_interface = desired_interface;
+				previous_interface_altsetting = desired_interface_altsetting;
 			}
 			else if (event.ctrl.bRequestType == 0x01 && event.ctrl.bRequest == 0x0b) {
 				// Set interface/alt_setting
@@ -305,28 +315,7 @@ void ep0_loop(int fd) {
 					// Need to stop all threads for eps and cleanup
 					printf("Changing interface/altsetting\n");
 
-					please_stop_eps = true;
-
-					int thread_num = host_config_desc[desired_configuration]
-							 .interfaces[previous_interface]
-							 .altsetting[previous_interface_altsetting]
-							 .interface
-							 .bNumEndpoints;
-					for (int i = 0; i < thread_num; i++) {
-						if (ep_thread_list[i].ep_thread_read &&
-							pthread_join(ep_thread_list[i].ep_thread_read, NULL)) {
-							fprintf(stderr, "Error join ep_thread_read\n");
-						}
-						if (ep_thread_list[i].ep_thread_write &&
-							pthread_join(ep_thread_list[i].ep_thread_write, NULL)) {
-							fprintf(stderr, "Error join ep_thread_write\n");
-						}
-
-						usb_raw_ep_disable(fd, ep_thread_list[i].ep_thread_info.ep_num);
-					}
-					delete[] ep_thread_list;
-
-					please_stop_eps = false;
+					terminate_eps(fd, previous_interface, previous_interface_altsetting);
 
 					if (previous_interface != desired_interface)
 						claim_interface(desired_interface);
