@@ -1,7 +1,6 @@
-#include <cstring>
-
 #include "host-raw-gadget.h"
 #include "device-libusb.h"
+#include "proxy.h"
 #include "misc.h"
 
 int verbose_level = 0;
@@ -154,7 +153,6 @@ int main(int argc, char **argv)
 	action.sa_handler = handle_signal;
 	sigaction(SIGTERM, &action, NULL);
 	sigaction(SIGINT, &action, NULL);
-	sigaction(SIGHUP, &action, NULL);
 
 	int opt, lopt, loidx;
 	const char *optstring = "hv";
