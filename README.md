@@ -24,6 +24,8 @@ This software is a USB proxy based on [raw-gadget](https://github.com/xairy/raw-
 ------------     ------------------------------------
 ```
 
+---
+
 ## How to use
 
 ### Step 1: Prerequisite
@@ -32,7 +34,7 @@ Please clone the [raw-gadget](https://github.com/xairy/raw-gadget), and compile 
 
 Install the package
 ```shell
-sudo apt install libusb-1.0-0-dev
+sudo apt install libusb-1.0-0-dev libjsoncpp-dev
 ```
 
 ### Step 2: Check device and driver name
@@ -75,6 +77,7 @@ Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
 As you can see, There is a `Bus 001 Device 003: ID 1b3f:2247 Generalplus Technology Inc. GENERAL WEBCAM`, and `1b3f:2247` is the `vendor_id` and `product_id` with a colon between them.
 
 ### Step 4: Run
+
 ```
 Usage:
     -h/--help: print this help message
@@ -83,6 +86,8 @@ Usage:
     --driver: use specific driver
     --vendor_id: use specific vendor_id(HEX) of USB device
     --product_id: use specific product_id(HEX) of USB device
+    --enable_injection: enable the injection feature
+    --injection_file: specify the file that contains injection rules
 ```
 - If `device` not specified, `usb-proxy` will use `dummy_udc.0` as default device.
 - If `driver` not specified, `usb-proxy` will use `dummy_udc` as default driver.
@@ -94,3 +99,60 @@ $ ./usb-proxy --device=fe980000.usb --driver=fe980000.usb --vendor_id=1b3f --pro
 ```
 
 Please replace `fe980000.usb` with the `device` that you have when running this software, and then replace the `driver` variable with the string after `USB_UDC_NAME=` in step 2. Please also modify the `vendor_id` and `product_id` variable that you have checked in step 3.
+
+---
+
+## How to do MITM attack with this project
+
+This feature is still very simple. Ideas or suggestions are very welcome.
+
+### Step 1: Create rules
+
+Please edit the `injection.json` for the injection rules. The following is the default template.
+```json
+{
+	"control": [], // Not implemented yet
+	"int": [
+		{
+			"ep_address": 81, // Endpoint address in Hex
+			"enable": false, // Enable this rule or not
+			"content_pattern": [], // If USB packet contains any data that match any patterns, the matched data will be replaced with the value in "replacement". Format is Hex string, for example: \\x01\\x00\\x00\\x00
+			"replacement": "" // The content after modified. Format is Hex string, for example: \\x02\\x00\\x00\\x00
+		}
+	],
+	"bulk": [],
+	"isoc": [] // This transfer type is not supported yet
+}
+```
+
+For example, the following rules work with my USB mouse, and convert left click to right click, and convert right click to left click.
+```json
+{
+    "control": [],
+    "int": [
+        {
+            "ep_address": 81,
+            "enable": true,
+            "content_pattern": ["\\x01\\x00\\x00\\x00"],
+            "replacement": "\\x02\\x00\\x00\\x00"
+        },
+        {
+            "ep_address": 81,
+            "enable": true,
+            "content_pattern": ["\\x02\\x00\\x00\\x00"],
+            "replacement": "\\x01\\x00\\x00\\x00"
+        }
+    ],
+    "bulk": [],
+    "isoc": []
+}
+```
+
+### Step 2: Run
+
+Use the `--enable_injection` to enable this feature, and use `--injection_file` to specify the file path of your customized injection rules, if it is not specified, `usb-proxy` will use `injection.json` by default.
+
+For example
+```
+$ ./usb-proxy --device=fe980000.usb --driver=fe980000.usb --enable_injection --injection_file=myInjectionRules.json
+```

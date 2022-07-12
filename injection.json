@@ -1,0 +1,13 @@
+{
+	"control": [],
+	"int": [
+		{
+			"ep_address": 81,
+			"enable": false,
+			"content_pattern": [],
+			"replacement": ""
+		}
+	],
+	"bulk": [],
+	"isoc": []
+}

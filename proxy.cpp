@@ -2,6 +2,45 @@
 #include "device-libusb.h"
 #include "misc.h"
 
+void injection(struct data_queue_info &temp_data, struct usb_endpoint_descriptor ep, std::string transfer_type) {
+	// This is just a simple injection function.
+	for (size_t i = 0; i < injection_config[transfer_type].size(); i++) {
+		if (injection_config[transfer_type][i]["enable"].asBool() != true ||
+		    hexToDecimal(injection_config[transfer_type][i]["ep_address"].asInt()) != ep.bEndpointAddress)
+			continue;
+
+		bool data_modified = false;
+		std::string data(temp_data.io.data, temp_data.length);
+		std::string replacement_hex = injection_config[transfer_type][i]["replacement"].asString();
+		std::string replacement = hexToAscii(replacement_hex);
+		for (size_t j = 0; j < injection_config[transfer_type][i]["content_pattern"].size(); j++) {
+			std::string pattern_hex = injection_config[transfer_type][i]["content_pattern"][j].asString();
+			std::string pattern = hexToAscii(pattern_hex);
+
+			size_t pos = data.find(pattern);
+			while (pos != std::string::npos) {
+				if (data.length() - pattern.length() + replacement.length() > 1023)
+					break;
+
+				data = data.replace(pos, pattern.length(), replacement);
+				printf("Modified from %s to %s at Index %d\n", pattern_hex.c_str(), replacement_hex.c_str(), pos);
+				data_modified = true;
+
+				pos = data.find(pattern);
+			}
+		}
+
+		if (data_modified) {
+			temp_data.length = data.length();
+			for (size_t j = 0; j < data.length(); j++) {
+				temp_data.io.data[j] = data[j];
+			}
+
+			break;
+		}
+	}
+}
+
 void *ep_loop_write(void *arg) {
 	struct thread_info ep_thread_info = *((struct thread_info*) arg);
 	int fd = ep_thread_info.fd;
@@ -27,6 +66,15 @@ void *ep_loop_write(void *arg) {
 		data_queue->pop_front();
 		data_mutex->unlock();
 		struct usb_raw_transfer_io io = temp_data.io;
+
+		if (verbose_level >= 2) {
+			printf("Sending data to EP%x(%s_%s):", ep.bEndpointAddress,
+				transfer_type.c_str(), dir.c_str());
+			for (int i = 0; i < temp_data.length; i++) {
+				printf(" %02x", (unsigned)io.data[i]);
+			}
+			printf("\n");
+		}
 
 		if (ep.bEndpointAddress & USB_DIR_IN) {
 			int rv = usb_raw_ep_write(fd, (struct usb_raw_ep_io *)&io);
@@ -86,6 +134,9 @@ void *ep_loop_read(void *arg) {
 				temp_data.io.inner.length = nbytes;
 				temp_data.length = nbytes;
 
+				if (injection_enabled)
+					injection(temp_data, ep, transfer_type);
+
 				data_mutex->lock();
 				data_queue->push_back(temp_data);
 				data_mutex->unlock();
@@ -107,6 +158,9 @@ void *ep_loop_read(void *arg) {
 				printf("EP%x(%s_%s): read %d bytes from host\n", ep.bEndpointAddress,
 						transfer_type.c_str(), dir.c_str(), rv);
 				temp_data.length = rv;
+
+				if (injection_enabled)
+					injection(temp_data, ep, transfer_type);
 
 				data_mutex->lock();
 				data_queue->push_back(temp_data);

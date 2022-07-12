@@ -11,6 +11,10 @@ int desired_configuration = 1;
 int desired_interface = 0;
 int desired_interface_altsetting = 0;
 
+bool injection_enabled = false;
+std::string injection_file = "injection.json";
+Json::Value injection_config;
+
 void usage() {
 	printf("Usage:\n");
 	printf("\t-h/--help: print this help message\n");
@@ -18,11 +22,14 @@ void usage() {
 	printf("\t--device: use specific device\n");
 	printf("\t--driver: use specific driver\n");
 	printf("\t--vendor_id: use specific vendor_id of USB device\n");
-	printf("\t--product_id: use specific product_id of USB device\n\n");
-	printf("If `device` not specified, `usb-proxy` will use `dummy_udc.0` as default device\n");
-	printf("If `driver` not specified, `usb-proxy` will use `dummy_udc` as default driver.\n");
-	printf("If both `vendor_id` and `product_id` not specified, `usb-proxy` will connect\n");
-	printf("the first USB device it can find.\n\n");
+	printf("\t--product_id: use specific product_id of USB device\n");
+	printf("\t--enable_injection: enable the injection feature\n");
+	printf("\t--injection_file: specify the file that contains injection rules\n\n");
+	printf("* If `device` not specified, `usb-proxy` will use `dummy_udc.0` as default device.\n");
+	printf("* If `driver` not specified, `usb-proxy` will use `dummy_udc` as default driver.\n");
+	printf("* If both `vendor_id` and `product_id` not specified, `usb-proxy` will connect\n");
+	printf("  the first USB device it can find.\n");
+	printf("* If `injection_file` not specified, `usb-proxy` will use `injection.json` by default.\n\n");
 	exit(1);
 }
 
@@ -164,6 +171,8 @@ int main(int argc, char **argv)
 		{"driver", required_argument, &lopt, 4},
 		{"vendor_id", required_argument, &lopt, 5},
 		{"product_id", required_argument, &lopt, 6},
+		{"enable_injection", no_argument, &lopt, 7},
+		{"injection_file", required_argument, &lopt, 8},
 		{0, 0, 0, 0}
 	};
 	while ((opt = getopt_long(argc, argv, optstring, long_options, &loidx)) != -1) {
@@ -194,6 +203,12 @@ int main(int argc, char **argv)
 		case 6:
 			product_id = std::stoul(optarg, nullptr, 16);
 			break;
+		case 7:
+			injection_enabled = true;
+			break;
+		case 8:
+			injection_file = optarg;
+			break;
 
 		default:
 			usage();
@@ -204,6 +219,29 @@ int main(int argc, char **argv)
 	printf("Driver is: %s\n", driver);
 	printf("vendor_id is: %d\n", vendor_id);
 	printf("product_id is: %d\n", product_id);
+
+	if (injection_enabled) {
+		printf("Injection enabled\n");
+		if (injection_file.empty()) {
+			printf("Injection file not specified\n");
+			return 1;
+		}
+		struct stat buffer;
+		if (stat(injection_file.c_str(), &buffer) != 0) {
+			printf("Injection file %s not found\n", injection_file.c_str());
+			return 1;
+		}
+
+		Json::Reader jsonReader;
+		std::ifstream ifs(injection_file.c_str());
+		if (jsonReader.parse(ifs, injection_config))
+			printf("Parsed injection file: %s\n", injection_file.c_str());
+		else {
+			printf("Error parsing injection file: %s\n", injection_file.c_str());
+			return 1;
+		}
+		ifs.close();
+	}
 
 	while (connect_device(vendor_id, product_id)) {
 		sleep(1);
