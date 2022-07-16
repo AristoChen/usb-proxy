@@ -2,22 +2,22 @@
 #include "device-libusb.h"
 #include "misc.h"
 
-void injection(struct data_queue_info &temp_data, struct usb_endpoint_descriptor ep, std::string transfer_type) {
+void injection(struct usb_raw_transfer_io &io, struct usb_endpoint_descriptor ep, std::string transfer_type) {
 	// This is just a simple injection function.
-	for (size_t i = 0; i < injection_config[transfer_type].size(); i++) {
+	for (unsigned int i = 0; i < injection_config[transfer_type].size(); i++) {
 		if (injection_config[transfer_type][i]["enable"].asBool() != true ||
 		    hexToDecimal(injection_config[transfer_type][i]["ep_address"].asInt()) != ep.bEndpointAddress)
 			continue;
 
 		bool data_modified = false;
-		std::string data(temp_data.io.data, temp_data.length);
+		std::string data(io.data, io.inner.length);
 		std::string replacement_hex = injection_config[transfer_type][i]["replacement"].asString();
 		std::string replacement = hexToAscii(replacement_hex);
-		for (size_t j = 0; j < injection_config[transfer_type][i]["content_pattern"].size(); j++) {
+		for (unsigned int j = 0; j < injection_config[transfer_type][i]["content_pattern"].size(); j++) {
 			std::string pattern_hex = injection_config[transfer_type][i]["content_pattern"][j].asString();
 			std::string pattern = hexToAscii(pattern_hex);
 
-			size_t pos = data.find(pattern);
+			__u32 pos = data.find(pattern);
 			while (pos != std::string::npos) {
 				if (data.length() - pattern.length() + replacement.length() > 1023)
 					break;
@@ -31,9 +31,9 @@ void injection(struct data_queue_info &temp_data, struct usb_endpoint_descriptor
 		}
 
 		if (data_modified) {
-			temp_data.length = data.length();
+			io.inner.length = data.length();
 			for (size_t j = 0; j < data.length(); j++) {
-				temp_data.io.data[j] = data[j];
+				io.data[j] = data[j];
 			}
 
 			break;
@@ -48,7 +48,7 @@ void *ep_loop_write(void *arg) {
 	struct usb_endpoint_descriptor ep = ep_thread_info.endpoint;
 	std::string transfer_type = ep_thread_info.transfer_type;
 	std::string dir = ep_thread_info.dir;
-	std::deque<data_queue_info> *data_queue = ep_thread_info.data_queue;
+	std::deque<usb_raw_transfer_io> *data_queue = ep_thread_info.data_queue;
 	std::mutex *data_mutex = ep_thread_info.data_mutex;
 
 	printf("Start writing thread for EP%02x, thread id(%d)\n",
@@ -62,15 +62,14 @@ void *ep_loop_write(void *arg) {
 		}
 
 		data_mutex->lock();
-		struct data_queue_info temp_data = data_queue->front();
+		struct usb_raw_transfer_io io = data_queue->front();
 		data_queue->pop_front();
 		data_mutex->unlock();
-		struct usb_raw_transfer_io io = temp_data.io;
 
 		if (verbose_level >= 2) {
 			printf("Sending data to EP%x(%s_%s):", ep.bEndpointAddress,
 				transfer_type.c_str(), dir.c_str());
-			for (int i = 0; i < temp_data.length; i++) {
+			for (unsigned int i = 0; i < io.inner.length; i++) {
 				printf(" %02x", (unsigned)io.data[i]);
 			}
 			printf("\n");
@@ -84,7 +83,7 @@ void *ep_loop_write(void *arg) {
 			}
 		}
 		else {
-			int length = temp_data.length;
+			int length = io.inner.length;
 			unsigned char *data = new unsigned char[length];
 			memcpy(data, io.data, length);
 			send_data(ep.bEndpointAddress, ep.bmAttributes, data, length);
@@ -106,7 +105,7 @@ void *ep_loop_read(void *arg) {
 	struct usb_endpoint_descriptor ep = ep_thread_info.endpoint;
 	std::string transfer_type = ep_thread_info.transfer_type;
 	std::string dir = ep_thread_info.dir;
-	std::deque<data_queue_info> *data_queue = ep_thread_info.data_queue;
+	std::deque<usb_raw_transfer_io> *data_queue = ep_thread_info.data_queue;
 	std::mutex *data_mutex = ep_thread_info.data_mutex;
 
 	printf("Start reading thread for EP%02x, thread id(%d)\n",
@@ -114,7 +113,7 @@ void *ep_loop_read(void *arg) {
 
 	while (!please_stop_eps) {
 		assert(ep_num != -1);
-		struct data_queue_info temp_data;
+		struct usb_raw_transfer_io io;
 
 		if (ep.bEndpointAddress & USB_DIR_IN) {
 			unsigned char *data = NULL;
@@ -128,17 +127,16 @@ void *ep_loop_read(void *arg) {
 			receive_data(ep.bEndpointAddress, ep.bmAttributes, ep.wMaxPacketSize, &data, &nbytes, 0);
 
 			if (nbytes > 0) { // Not sure if we should enqueue data if nbytes == 0
-				memcpy(temp_data.io.data, data, nbytes);
-				temp_data.io.inner.ep = ep_num;
-				temp_data.io.inner.flags = 0;
-				temp_data.io.inner.length = nbytes;
-				temp_data.length = nbytes;
+				memcpy(io.data, data, nbytes);
+				io.inner.ep = ep_num;
+				io.inner.flags = 0;
+				io.inner.length = nbytes;
 
 				if (injection_enabled)
-					injection(temp_data, ep, transfer_type);
+					injection(io, ep, transfer_type);
 
 				data_mutex->lock();
-				data_queue->push_back(temp_data);
+				data_queue->push_back(io);
 				data_mutex->unlock();
 				if (verbose_level)
 					printf("EP%x(%s_%s): enqueued %d bytes to queue\n", ep.bEndpointAddress,
@@ -149,21 +147,21 @@ void *ep_loop_read(void *arg) {
 				delete[] data;
 		}
 		else {
-			temp_data.io.inner.ep = ep_num;
-			temp_data.io.inner.flags = 0;
-			temp_data.io.inner.length = sizeof(temp_data.io.data);
+			io.inner.ep = ep_num;
+			io.inner.flags = 0;
+			io.inner.length = sizeof(io.data);
 
-			int rv = usb_raw_ep_read(fd, (struct usb_raw_ep_io *)&temp_data.io);
+			int rv = usb_raw_ep_read(fd, (struct usb_raw_ep_io *)&io);
 			if (rv >= 0) {
 				printf("EP%x(%s_%s): read %d bytes from host\n", ep.bEndpointAddress,
 						transfer_type.c_str(), dir.c_str(), rv);
-				temp_data.length = rv;
+				io.inner.length = rv;
 
 				if (injection_enabled)
-					injection(temp_data, ep, transfer_type);
+					injection(io, ep, transfer_type);
 
 				data_mutex->lock();
-				data_queue->push_back(temp_data);
+				data_queue->push_back(io);
 				data_mutex->unlock();
 				if (verbose_level)
 					printf("EP%x(%s_%s): enqueued %d bytes to queue\n", ep.bEndpointAddress,
@@ -190,7 +188,7 @@ void process_eps(int fd) {
 
 		ep_thread_list[i].ep_thread_info.fd = fd;
 		ep_thread_list[i].ep_thread_info.endpoint = temp_interface.endpoints[i];
-		ep_thread_list[i].ep_thread_info.data_queue = new std::deque<data_queue_info>;
+		ep_thread_list[i].ep_thread_info.data_queue = new std::deque<usb_raw_transfer_io>;
 		ep_thread_list[i].ep_thread_info.data_mutex = new std::mutex;
 
 		switch (usb_endpoint_type(&temp_interface.endpoints[i])) {
@@ -288,7 +286,7 @@ void ep0_loop(int fd) {
 		if (event.inner.type != USB_RAW_EVENT_CONTROL)
 			continue;
 
-		struct usb_raw_control_io io;
+		struct usb_raw_transfer_io io;
 		io.inner.ep = 0;
 		io.inner.flags = 0;
 		io.inner.length = event.ctrl.wLength;

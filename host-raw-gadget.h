@@ -133,18 +133,13 @@ struct usb_raw_transfer_io {
 
 /*----------------------------------------------------------------------*/
 
-struct data_queue_info {
-	struct usb_raw_transfer_io 	io;
-	int 				length = 0;
-};
-
 struct thread_info {
 	int				fd;
 	int				ep_num = -1;
 	struct usb_endpoint_descriptor 	endpoint;
 	std::string			transfer_type;
 	std::string			dir;
-	std::deque<data_queue_info>	*data_queue;
+	std::deque<usb_raw_transfer_io> *data_queue;
 	std::mutex			*data_mutex;
 };
 
