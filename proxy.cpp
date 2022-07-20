@@ -1,44 +1,102 @@
+#include <vector>
+
 #include "host-raw-gadget.h"
 #include "device-libusb.h"
 #include "misc.h"
 
-void injection(struct usb_raw_transfer_io &io, struct usb_endpoint_descriptor ep, std::string transfer_type) {
-	// This is just a simple injection function.
-	for (unsigned int i = 0; i < injection_config[transfer_type].size(); i++) {
-		if (injection_config[transfer_type][i]["enable"].asBool() != true ||
-		    hexToDecimal(injection_config[transfer_type][i]["ep_address"].asInt()) != ep.bEndpointAddress)
-			continue;
+void injection(struct usb_raw_transfer_io &io, Json::Value patterns, std::string replacement_hex, bool &data_modified) {
+	std::string data(io.data, io.inner.length);
+	std::string replacement = hexToAscii(replacement_hex);
+	for (unsigned int j = 0; j < patterns.size(); j++) {
+		std::string pattern_hex = patterns[j].asString();
+		std::string pattern = hexToAscii(pattern_hex);
 
-		bool data_modified = false;
-		std::string data(io.data, io.inner.length);
-		std::string replacement_hex = injection_config[transfer_type][i]["replacement"].asString();
-		std::string replacement = hexToAscii(replacement_hex);
-		for (unsigned int j = 0; j < injection_config[transfer_type][i]["content_pattern"].size(); j++) {
-			std::string pattern_hex = injection_config[transfer_type][i]["content_pattern"][j].asString();
-			std::string pattern = hexToAscii(pattern_hex);
+		__u32 pos = data.find(pattern);
+		while (pos != std::string::npos) {
+			if (data.length() - pattern.length() + replacement.length() > 1023)
+				break;
 
-			__u32 pos = data.find(pattern);
-			while (pos != std::string::npos) {
-				if (data.length() - pattern.length() + replacement.length() > 1023)
-					break;
+			data = data.replace(pos, pattern.length(), replacement);
+			printf("Modified from %s to %s at Index %d\n", pattern_hex.c_str(), replacement_hex.c_str(), pos);
+			data_modified = true;
 
-				data = data.replace(pos, pattern.length(), replacement);
-				printf("Modified from %s to %s at Index %d\n", pattern_hex.c_str(), replacement_hex.c_str(), pos);
-				data_modified = true;
-
-				pos = data.find(pattern);
-			}
-		}
-
-		if (data_modified) {
-			io.inner.length = data.length();
-			for (size_t j = 0; j < data.length(); j++) {
-				io.data[j] = data[j];
-			}
-
-			break;
+			pos = data.find(pattern);
 		}
 	}
+
+	if (data_modified) {
+		io.inner.length = data.length();
+		for (size_t j = 0; j < data.length(); j++) {
+			io.data[j] = data[j];
+		}
+	}
+}
+
+void injection(struct usb_raw_control_event &event, struct usb_raw_transfer_io &io, int &injection_flags) {
+	// This is just a simple injection function for control transfer.
+	std::vector<std::string> injection_type{"modify", "ignore", "stall"};
+	std::string transfer_type = "control";
+
+	for (unsigned int i = 0; i < injection_type.size(); i++) {
+		for (unsigned int j = 0; j < injection_config[transfer_type][injection_type[i]].size(); j++) {
+			Json::Value rule = injection_config[transfer_type][injection_type[i]][j];
+			if (rule["enable"].asBool() != true)
+				continue;
+
+			if (event.ctrl.bRequestType != hexToDecimal(rule["bRequestType"].asInt()) ||
+			    event.ctrl.bRequest     != hexToDecimal(rule["bRequest"].asInt()) ||
+			    event.ctrl.wValue       != hexToDecimal(rule["wValue"].asInt()) ||
+			    event.ctrl.wIndex       != hexToDecimal(rule["wIndex"].asInt()) ||
+			    event.ctrl.wLength      != hexToDecimal(rule["wLength"].asInt()))
+				continue;
+
+			printf("Matched injection rule: %s, index: %d\n", injection_type[i].c_str(), j);
+			if (injection_type[i] == "modify") {
+				Json::Value patterns = rule["content_pattern"];
+				std::string replacement_hex = rule["replacement"].asString();
+				bool data_modified = false;
+
+				injection(io, patterns, replacement_hex, data_modified);
+				if (!(event.ctrl.bRequestType & USB_DIR_IN))
+					event.ctrl.wLength = io.inner.length;
+			}
+			else if (injection_type[i] == "ignore") {
+				printf("Ignore this control transfer\n");
+				injection_flags = USB_INJECTION_FLAG_IGNORE;
+			}
+			else if (injection_type[i] == "stall") {
+				injection_flags = USB_INJECTION_FLAG_STALL;
+			}
+		}
+	}
+}
+
+void injection(struct usb_raw_transfer_io &io, struct usb_endpoint_descriptor ep, std::string transfer_type) {
+	// This is just a simple injection function for int and bulk transfer.
+	for (unsigned int i = 0; i < injection_config[transfer_type].size(); i++) {
+		Json::Value rule = injection_config[transfer_type][i];
+		if (rule["enable"].asBool() != true ||
+		    hexToDecimal(rule["ep_address"].asInt()) != ep.bEndpointAddress)
+			continue;
+
+		Json::Value patterns = rule["content_pattern"];
+		std::string replacement_hex = rule["replacement"].asString();
+		bool data_modified = false;
+
+		injection(io, patterns, replacement_hex, data_modified);
+
+		if (data_modified)
+			break;
+	}
+}
+
+void printData(struct usb_raw_transfer_io io, __u8 bEndpointAddress, std::string transfer_type, std::string dir) {
+	printf("Sending data to EP%x(%s_%s):", bEndpointAddress,
+		transfer_type.c_str(), dir.c_str());
+	for (unsigned int i = 0; i < io.inner.length; i++) {
+		printf(" %02x", (unsigned)io.data[i]);
+	}
+	printf("\n");
 }
 
 void *ep_loop_write(void *arg) {
@@ -66,14 +124,8 @@ void *ep_loop_write(void *arg) {
 		data_queue->pop_front();
 		data_mutex->unlock();
 
-		if (verbose_level >= 2) {
-			printf("Sending data to EP%x(%s_%s):", ep.bEndpointAddress,
-				transfer_type.c_str(), dir.c_str());
-			for (unsigned int i = 0; i < io.inner.length; i++) {
-				printf(" %02x", (unsigned)io.data[i]);
-			}
-			printf("\n");
-		}
+		if (verbose_level >= 2)
+			printData(io, ep.bEndpointAddress, transfer_type, dir);
 
 		if (ep.bEndpointAddress & USB_DIR_IN) {
 			int rv = usb_raw_ep_write(fd, (struct usb_raw_ep_io *)&io);
@@ -117,7 +169,7 @@ void *ep_loop_read(void *arg) {
 
 		if (ep.bEndpointAddress & USB_DIR_IN) {
 			unsigned char *data = NULL;
-			int nbytes = 0;
+			int nbytes = -1;
 
 			if (data_queue->size() >= 32) {
 				usleep(200);
@@ -126,7 +178,7 @@ void *ep_loop_read(void *arg) {
 
 			receive_data(ep.bEndpointAddress, ep.bmAttributes, ep.wMaxPacketSize, &data, &nbytes, 0);
 
-			if (nbytes > 0) { // Not sure if we should enqueue data if nbytes == 0
+			if (nbytes >= 0) {
 				memcpy(io.data, data, nbytes);
 				io.inner.ep = ep_num;
 				io.inner.flags = 0;
@@ -291,6 +343,7 @@ void ep0_loop(int fd) {
 		io.inner.flags = 0;
 		io.inner.length = event.ctrl.wLength;
 
+		int injection_flags = USB_INJECTION_FLAG_NONE;
 		int nbytes = 0;
 		int result = 0;
 		unsigned char *control_data = new unsigned char[event.ctrl.wLength];
@@ -301,11 +354,32 @@ void ep0_loop(int fd) {
 			if (result == 0) {
 				memcpy(&io.data[0], control_data, nbytes);
 				io.inner.length = nbytes;
+
+				if (injection_enabled) {
+					injection(event, io, injection_flags);
+					switch(injection_flags) {
+					case USB_INJECTION_FLAG_NONE:
+						break;
+					case USB_INJECTION_FLAG_IGNORE:
+						delete[] control_data;
+						continue;
+					case USB_INJECTION_FLAG_STALL:
+						delete[] control_data;
+						usb_raw_ep0_stall(fd);
+						continue;
+					default:
+						printf("[Warning] Unknown injection flags: %d\n", injection_flags);
+						break;
+					}
+				}
+
+				if (verbose_level >= 2)
+					printData(io, 0x00, "control", "in");
+
 				rv = usb_raw_ep0_write(fd, (struct usb_raw_ep_io *)&io);
 				printf("ep0: transferred %d bytes (in)\n", rv);
 			}
 			else {
-				printf("ep0: stalling\n");
 				usb_raw_ep0_stall(fd);
 			}
 		}
@@ -390,13 +464,34 @@ void ep0_loop(int fd) {
 				previous_interface_altsetting = desired_interface_altsetting;
 			}
 			else {
+				if (injection_enabled) {
+					injection(event, io, injection_flags);
+					switch(injection_flags) {
+					case USB_INJECTION_FLAG_NONE:
+						break;
+					case USB_INJECTION_FLAG_IGNORE:
+						delete[] control_data;
+						continue;
+					case USB_INJECTION_FLAG_STALL:
+						delete[] control_data;
+						usb_raw_ep0_stall(fd);
+						continue;
+					default:
+						printf("[Warning] Unknown injection flags: %d\n", injection_flags);
+						break;
+					}
+				}
+
 				memcpy(control_data, io.data, event.ctrl.wLength);
+
+				if (verbose_level >= 2)
+					printData(io, 0x00, "control", "out");
+
 				result = control_request(&event.ctrl, &nbytes, &control_data, 1000);
 				if (result == 0) {
 					printf("ep0: transferred %d bytes (out)\n", rv);
 				}
 				else {
-					printf("ep0: stalling\n");
 					usb_raw_ep0_stall(fd);
 				}
 			}

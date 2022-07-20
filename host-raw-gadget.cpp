@@ -159,6 +159,7 @@ int usb_raw_eps_info(int fd, struct usb_raw_eps_info *info) {
 }
 
 void usb_raw_ep0_stall(int fd) {
+	printf("ep0: stalling\n");
 	int rv = ioctl(fd, USB_RAW_IOCTL_EP0_STALL, 0);
 	if (rv < 0) {
 		if (errno == EBUSY)

@@ -1,5 +1,40 @@
 {
-	"control": [],
+	"control": {
+		"modify": [
+			{
+				"enable": false,
+				"bRequestType": 0,
+				"bRequest": 0,
+				"wValue": 0,
+				"wIndex": 0,
+				"wLength": 0,
+				"content_pattern": [],
+				"replacement": ""
+			}
+		],
+		"ignore": [
+			{
+				"enable": false,
+				"bRequestType": 0,
+				"bRequest": 0,
+				"wValue": 0,
+				"wIndex": 0,
+				"wLength": 0,
+				"content_pattern": []
+			}
+		],
+		"stall": [
+			{
+				"enable": false,
+				"bRequestType": 0,
+				"bRequest": 0,
+				"wValue": 0,
+				"wIndex": 0,
+				"wLength": 0,
+				"content_pattern": []
+			}
+		]
+	},
 	"int": [
 		{
 			"ep_address": 81,
@@ -8,6 +43,13 @@
 			"replacement": ""
 		}
 	],
-	"bulk": [],
+	"bulk": [
+		{
+			"ep_address": 81,
+			"enable": false,
+			"content_pattern": [],
+			"replacement": ""
+		}
+	],
 	"isoc": []
 }

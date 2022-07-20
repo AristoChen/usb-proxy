@@ -109,18 +109,63 @@ This feature is still very simple. Ideas or suggestions are very welcome.
 ### Step 1: Create rules
 
 Please edit the `injection.json` for the injection rules. The following is the default template.
+
+Note: The comment in the following template is only for explaining the meaning, please do not copy the comment, it is invalid in json.
+
 ```json
 {
-	"control": [], // Not implemented yet
+	"control": {
+        "modify": [ // For modify the control transfer data
+            {
+                "enable": false, // Enable this rule or not
+                "bRequestType": 0, // Hex value
+                "bRequest": 0, // Hex value
+                "wValue": 0, // Hex value
+                "wIndex": 0, // Hex value
+                "wLength": 0, // Hex value
+                "content_pattern": [], // If USB packet contains any data that match any patterns, the matched data will be replaced with the value in "replacement". Format is Hex string, for example: \\x01\\x00\\x00\\x00
+                "replacement": "" // The content after modified. Format is Hex string, for example: \\x02\\x00\\x00\\x00
+            }
+        ],
+        "ignore": [ // For ignoring control transfer packet, it won't be sent to Host/Device if match the rule
+            {
+                "enable": false,
+                "bRequestType": 0,
+                "bRequest": 0,
+                "wValue": 0,
+                "wIndex": 0,
+                "wLength": 0,
+                "content_pattern": []
+            }
+        ],
+        "stall": [ // For stalling Host if match the rule
+            {
+                "enable": false,
+                "bRequestType": 0,
+                "bRequest": 0,
+                "wValue": 0,
+                "wIndex": 0,
+                "wLength": 0,
+                "content_pattern": []
+            }
+        ]
+    },
 	"int": [
 		{
 			"ep_address": 81, // Endpoint address in Hex
-			"enable": false, // Enable this rule or not
-			"content_pattern": [], // If USB packet contains any data that match any patterns, the matched data will be replaced with the value in "replacement". Format is Hex string, for example: \\x01\\x00\\x00\\x00
-			"replacement": "" // The content after modified. Format is Hex string, for example: \\x02\\x00\\x00\\x00
+			"enable": false,
+			"content_pattern": [],
+			"replacement": ""
 		}
 	],
-	"bulk": [],
+	"bulk": [
+        {
+            "ep_address": 81,
+            "enable": false,
+            "content_pattern": [],
+            "replacement": ""
+        }
+    ],
 	"isoc": [] // This transfer type is not supported yet
 }
 ```
@@ -128,7 +173,11 @@ Please edit the `injection.json` for the injection rules. The following is the d
 For example, the following rules work with my USB mouse, and convert left click to right click, and convert right click to left click.
 ```json
 {
-    "control": [],
+    "control": {
+        "modify": [],
+        "ignore": [],
+        "stall": []
+    },
     "int": [
         {
             "ep_address": 81,

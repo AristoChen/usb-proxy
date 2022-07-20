@@ -153,6 +153,14 @@ extern endpoint_thread *ep_thread_list;
 
 /*----------------------------------------------------------------------*/
 
+enum usb_injection_flags {
+	USB_INJECTION_FLAG_NONE,
+	USB_INJECTION_FLAG_IGNORE,
+	USB_INJECTION_FLAG_STALL,
+};
+
+/*----------------------------------------------------------------------*/
+
 int usb_raw_open();
 void usb_raw_init(int fd, enum usb_device_speed speed,
 			const char *driver, const char *device);
