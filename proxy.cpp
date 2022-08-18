@@ -11,13 +11,13 @@ void injection(struct usb_raw_transfer_io &io, Json::Value patterns, std::string
 		std::string pattern_hex = patterns[j].asString();
 		std::string pattern = hexToAscii(pattern_hex);
 
-		__u32 pos = data.find(pattern);
+		std::string::size_type pos = data.find(pattern);
 		while (pos != std::string::npos) {
 			if (data.length() - pattern.length() + replacement.length() > 1023)
 				break;
 
 			data = data.replace(pos, pattern.length(), replacement);
-			printf("Modified from %s to %s at Index %d\n", pattern_hex.c_str(), replacement_hex.c_str(), pos);
+			printf("Modified from %s to %s at Index %ld\n", pattern_hex.c_str(), replacement_hex.c_str(), pos);
 			data_modified = true;
 
 			pos = data.find(pattern);
