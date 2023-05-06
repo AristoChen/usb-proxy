@@ -274,7 +274,7 @@ void receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 			fprintf(stderr, "Isochronous(read) endpoint EP%02x unhandled.\n", endpoint);
 		break;
 	case USB_ENDPOINT_XFER_BULK:
-		*dataptr = (uint8_t *) malloc(maxPacketSize * 8);
+		*dataptr = new uint8_t[maxPacketSize * 8];
 		do {
 			result = libusb_bulk_transfer(dev_handle, endpoint, *dataptr, maxPacketSize, length, timeout);
 			if (result == LIBUSB_SUCCESS && verbose_level > 2)
@@ -286,7 +286,7 @@ void receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 		} while ((result == LIBUSB_ERROR_PIPE || result == LIBUSB_ERROR_TIMEOUT) && attempt < MAX_ATTEMPTS);
 		break;
 	case USB_ENDPOINT_XFER_INT:
-		*dataptr = (uint8_t *) malloc(maxPacketSize);
+		*dataptr = new uint8_t[maxPacketSize];
 		result = libusb_interrupt_transfer(dev_handle, endpoint, *dataptr, maxPacketSize, length, timeout);
 		if (result == LIBUSB_SUCCESS && verbose_level > 2)
 			printf("Received int data(%d) bytes\n", *length);
