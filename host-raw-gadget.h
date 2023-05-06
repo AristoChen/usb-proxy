@@ -82,26 +82,6 @@ struct usb_raw_eps_info {
 
 /*----------------------------------------------------------------------*/
 
-struct raw_gadget_interface_descriptor {
-	struct usb_interface_descriptor		interface;
-	struct usb_endpoint_descriptor		*endpoints;
-};
-
-struct raw_gadget_interface {
-	struct raw_gadget_interface_descriptor	*altsetting;
-	int					num_altsetting;
-};
-
-struct raw_gadget_config_descriptor {
-	struct usb_config_descriptor		config;
-	struct raw_gadget_interface		*interfaces;
-};
-
-extern struct usb_device_descriptor 		host_device_desc;
-extern struct raw_gadget_config_descriptor	*host_config_desc;
-
-/*----------------------------------------------------------------------*/
-
 #define EP_MAX_PACKET_CONTROL	1024
 #define EP_MAX_PACKET_BULK	1024
 #define EP_MAX_PACKET_INT	8
@@ -135,7 +115,7 @@ struct usb_raw_transfer_io {
 
 struct thread_info {
 	int				fd;
-	int				ep_num = -1;
+	int				ep_num;
 	struct usb_endpoint_descriptor 	endpoint;
 	std::string			transfer_type;
 	std::string			dir;
@@ -143,13 +123,36 @@ struct thread_info {
 	std::mutex			*data_mutex;
 };
 
-struct endpoint_thread {
-	pthread_t			ep_thread_read;
-	pthread_t			ep_thread_write;
-	struct thread_info		ep_thread_info;
+struct raw_gadget_endpoint {
+	struct usb_endpoint_descriptor	endpoint;
+	pthread_t			thread_read;
+	pthread_t			thread_write;
+	struct thread_info		thread_info;
 };
 
-extern endpoint_thread *ep_thread_list;
+struct raw_gadget_altsetting {
+	struct usb_interface_descriptor	interface;
+	struct raw_gadget_endpoint	*endpoints;
+};
+
+struct raw_gadget_interface {
+	struct raw_gadget_altsetting	*altsettings;
+	int				num_altsettings;
+	int				current_altsetting;
+};
+
+struct raw_gadget_config {
+	struct usb_config_descriptor	config;
+	struct raw_gadget_interface	*interfaces;
+};
+
+struct raw_gadget_device {
+	struct usb_device_descriptor 	device;
+	struct raw_gadget_config	*configs;
+	int				current_config;
+};
+
+extern struct raw_gadget_device host_device_desc;
 
 /*----------------------------------------------------------------------*/
 

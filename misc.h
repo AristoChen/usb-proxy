@@ -17,10 +17,6 @@ extern int verbose_level;
 extern bool please_stop_ep0;
 extern bool please_stop_eps;
 
-extern int desired_configuration;
-extern int desired_interface;
-extern int desired_interface_altsetting;
-
 extern bool injection_enabled;
 extern std::string injection_file;
 extern Json::Value injection_config;

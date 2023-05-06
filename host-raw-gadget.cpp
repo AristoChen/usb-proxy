@@ -16,10 +16,7 @@
 
 #include "host-raw-gadget.h"
 
-struct usb_device_descriptor		host_device_desc;
-struct raw_gadget_config_descriptor	*host_config_desc;
-
-struct endpoint_thread *ep_thread_list;
+struct raw_gadget_device host_device_desc;
 
 /*----------------------------------------------------------------------*/
 

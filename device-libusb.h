@@ -16,8 +16,9 @@ extern pthread_t hotplug_monitor_thread;
 
 int connect_device(int vendorId, int productId);
 void set_configuration(int configuration);
-void claim_interface(uint8_t interface);
-void release_interface(uint8_t interface);
+void claim_interface(int interface);
+void release_interface(int interface);
+void set_interface_alt_setting(int interface, int altsetting);
 int control_request(const usb_ctrlrequest *setup_packet, int *nbytes,
 			unsigned char **dataptr, int timeout);
 void send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,

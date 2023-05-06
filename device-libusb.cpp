@@ -186,19 +186,27 @@ void set_configuration(int configuration) {
 	}
 }
 
-void claim_interface(uint8_t interface) {
+void claim_interface(int interface) {
 	int result = libusb_claim_interface(dev_handle, interface);
 	if (result != LIBUSB_SUCCESS) {
 		fprintf(stderr, "Error claiming interface(%d): %s\n",
-				(unsigned)interface, libusb_strerror((libusb_error)result));
+				interface, libusb_strerror((libusb_error)result));
 	}
 }
 
-void release_interface(uint8_t interface) {
+void release_interface(int interface) {
 	int result = libusb_release_interface(dev_handle, interface);
 	if (result != LIBUSB_SUCCESS && result != LIBUSB_ERROR_NOT_FOUND) {
 		fprintf(stderr, "Error releasing interface(%d): %s\n",
-				(unsigned)interface, libusb_strerror((libusb_error)result));
+				interface, libusb_strerror((libusb_error)result));
+	}
+}
+
+void set_interface_alt_setting(int interface, int altsetting) {
+	int result = libusb_set_interface_alt_setting(dev_handle, interface, altsetting);
+	if (result != LIBUSB_SUCCESS) {
+		fprintf(stderr, "Error setting interface altsetting(%d, %d): %s\n",
+				interface, altsetting, libusb_strerror((libusb_error)result));
 	}
 }
 
