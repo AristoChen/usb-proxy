@@ -129,6 +129,28 @@ int connect_device(int vendor_id, int product_id) {
 		return result;
 	}
 
+	int config = 0;
+	result = libusb_get_configuration(dev_handle, &config);
+	if (result != LIBUSB_SUCCESS) {
+		fprintf(stderr, "libusb_get_configuration() failed: %s\n",
+				libusb_strerror((libusb_error)result));
+		return result;
+	}
+
+	for (int i = 0; i < device_device_desc.bNumConfigurations; i++) {
+		if (device_config_desc[i]->bConfigurationValue != config)
+			continue;
+		for (int j = 0; j < device_config_desc[i]->bNumInterfaces; j++)
+			libusb_detach_kernel_driver(dev_handle, j);
+	}
+
+	result = libusb_reset_device(dev_handle);
+	if (result != LIBUSB_SUCCESS) {
+		fprintf(stderr, "libusb_reset_device() failed: %s\n",
+				libusb_strerror((libusb_error)result));
+		return result;
+	}
+
 	//check that device is responsive
 	unsigned char unused[4];
 	result = libusb_get_string_descriptor(dev_handle, 0, 0, unused, sizeof(unused));

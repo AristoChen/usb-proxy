@@ -405,8 +405,6 @@ void ep0_loop(int fd) {
 					release_interface(desired_interface);
 
 					terminate_eps(fd, previous_interface, previous_interface_altsetting);
-
-					set_configuration(event.ctrl.wValue);
 				}
 
 				for (int i = 0; i < host_device_desc.bNumConfigurations; i++) {
@@ -414,6 +412,9 @@ void ep0_loop(int fd) {
 						desired_configuration = i;
 					}
 				}
+
+				usb_raw_configure(fd);
+				set_configuration(event.ctrl.wValue);
 				claim_interface(desired_interface);
 				process_eps(fd);
 
