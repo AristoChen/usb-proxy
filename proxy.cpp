@@ -94,7 +94,7 @@ void printData(struct usb_raw_transfer_io io, __u8 bEndpointAddress, std::string
 	printf("Sending data to EP%x(%s_%s):", bEndpointAddress,
 		transfer_type.c_str(), dir.c_str());
 	for (unsigned int i = 0; i < io.inner.length; i++) {
-		printf(" %02x", (unsigned)io.data[i]);
+		printf(" %02hhx", (unsigned)io.data[i]);
 	}
 	printf("\n");
 }
