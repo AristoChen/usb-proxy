@@ -94,20 +94,20 @@ void printData(struct usb_raw_transfer_io io, __u8 bEndpointAddress, std::string
 	printf("Sending data to EP%x(%s_%s):", bEndpointAddress,
 		transfer_type.c_str(), dir.c_str());
 	for (unsigned int i = 0; i < io.inner.length; i++) {
-		printf(" %02x", (unsigned)io.data[i]);
+		printf(" %02hhx", (unsigned)io.data[i]);
 	}
 	printf("\n");
 }
 
 void *ep_loop_write(void *arg) {
-	struct thread_info ep_thread_info = *((struct thread_info*) arg);
-	int fd = ep_thread_info.fd;
-	int ep_num = ep_thread_info.ep_num;
-	struct usb_endpoint_descriptor ep = ep_thread_info.endpoint;
-	std::string transfer_type = ep_thread_info.transfer_type;
-	std::string dir = ep_thread_info.dir;
-	std::deque<usb_raw_transfer_io> *data_queue = ep_thread_info.data_queue;
-	std::mutex *data_mutex = ep_thread_info.data_mutex;
+	struct thread_info thread_info = *((struct thread_info*) arg);
+	int fd = thread_info.fd;
+	int ep_num = thread_info.ep_num;
+	struct usb_endpoint_descriptor ep = thread_info.endpoint;
+	std::string transfer_type = thread_info.transfer_type;
+	std::string dir = thread_info.dir;
+	std::deque<usb_raw_transfer_io> *data_queue = thread_info.data_queue;
+	std::mutex *data_mutex = thread_info.data_mutex;
 
 	printf("Start writing thread for EP%02x, thread id(%d)\n",
 		ep.bEndpointAddress, gettid());
@@ -151,14 +151,14 @@ void *ep_loop_write(void *arg) {
 }
 
 void *ep_loop_read(void *arg) {
-	struct thread_info ep_thread_info = *((struct thread_info*) arg);
-	int fd = ep_thread_info.fd;
-	int ep_num = ep_thread_info.ep_num;
-	struct usb_endpoint_descriptor ep = ep_thread_info.endpoint;
-	std::string transfer_type = ep_thread_info.transfer_type;
-	std::string dir = ep_thread_info.dir;
-	std::deque<usb_raw_transfer_io> *data_queue = ep_thread_info.data_queue;
-	std::mutex *data_mutex = ep_thread_info.data_mutex;
+	struct thread_info thread_info = *((struct thread_info*) arg);
+	int fd = thread_info.fd;
+	int ep_num = thread_info.ep_num;
+	struct usb_endpoint_descriptor ep = thread_info.endpoint;
+	std::string transfer_type = thread_info.transfer_type;
+	std::string dir = thread_info.dir;
+	std::deque<usb_raw_transfer_io> *data_queue = thread_info.data_queue;
+	std::mutex *data_mutex = thread_info.data_mutex;
 
 	printf("Start reading thread for EP%02x, thread id(%d)\n",
 		ep.bEndpointAddress, gettid());
@@ -227,95 +227,91 @@ void *ep_loop_read(void *arg) {
 	return NULL;
 }
 
-void process_eps(int fd) {
-	struct raw_gadget_interface_descriptor temp_interface = host_config_desc[desired_configuration]
-								.interfaces[desired_interface]
-								.altsetting[desired_interface_altsetting];
-	ep_thread_list = new struct endpoint_thread[temp_interface.interface.bNumEndpoints];
-	printf("bNumEndpoints is %d\n", static_cast<int>(temp_interface.interface.bNumEndpoints));
+void process_eps(int fd, int config, int interface, int altsetting) {
+	struct raw_gadget_altsetting *alt = &host_device_desc.configs[config]
+					.interfaces[interface].altsettings[altsetting];
 
-	for (int i = 0; i < temp_interface.interface.bNumEndpoints; i++) {
-		int addr = usb_endpoint_num(&temp_interface.endpoints[i]);
+	printf("Activating %d endpoints on interface %d\n", (int)alt->interface.bNumEndpoints, interface);
+
+	for (int i = 0; i < alt->interface.bNumEndpoints; i++) {
+		struct raw_gadget_endpoint *ep = &alt->endpoints[i];
+
+		int addr = usb_endpoint_num(&ep->endpoint);
 		assert(addr != 0);
 
-		ep_thread_list[i].ep_thread_info.fd = fd;
-		ep_thread_list[i].ep_thread_info.endpoint = temp_interface.endpoints[i];
-		ep_thread_list[i].ep_thread_info.data_queue = new std::deque<usb_raw_transfer_io>;
-		ep_thread_list[i].ep_thread_info.data_mutex = new std::mutex;
+		ep->thread_info.fd = fd;
+		ep->thread_info.endpoint = ep->endpoint;
+		ep->thread_info.data_queue = new std::deque<usb_raw_transfer_io>;
+		ep->thread_info.data_mutex = new std::mutex;
 
-		switch (usb_endpoint_type(&temp_interface.endpoints[i])) {
+		switch (usb_endpoint_type(&ep->endpoint)) {
 		case USB_ENDPOINT_XFER_ISOC:
-			ep_thread_list[i].ep_thread_info.transfer_type = "isoc";
+			ep->thread_info.transfer_type = "isoc";
 			break;
 		case USB_ENDPOINT_XFER_BULK:
-			ep_thread_list[i].ep_thread_info.transfer_type = "bulk";
+			ep->thread_info.transfer_type = "bulk";
 			break;
 		case USB_ENDPOINT_XFER_INT:
-			ep_thread_list[i].ep_thread_info.transfer_type = "int";
+			ep->thread_info.transfer_type = "int";
 			break;
 		default:
-			printf("transfer_type %d is invalid\n", usb_endpoint_type(&temp_interface.endpoints[i]));
+			printf("transfer_type %d is invalid\n", usb_endpoint_type(&ep->endpoint));
 			assert(false);
 		}
 
-		if (usb_endpoint_dir_in(&temp_interface.endpoints[i]))
-			ep_thread_list[i].ep_thread_info.dir = "in";
+		if (usb_endpoint_dir_in(&ep->endpoint))
+			ep->thread_info.dir = "in";
 		else
-			ep_thread_list[i].ep_thread_info.dir = "out";
+			ep->thread_info.dir = "out";
 
-		ep_thread_list[i].ep_thread_info.ep_num = usb_raw_ep_enable(fd,
-					&ep_thread_list[i].ep_thread_info.endpoint);
+		ep->thread_info.ep_num = usb_raw_ep_enable(fd, &ep->thread_info.endpoint);
 		printf("%s_%s: addr = %u, ep = #%d\n",
-			ep_thread_list[i].ep_thread_info.transfer_type.c_str(),
-			ep_thread_list[i].ep_thread_info.dir.c_str(),
-			addr, ep_thread_list[i].ep_thread_info.ep_num);
+			ep->thread_info.transfer_type.c_str(),
+			ep->thread_info.dir.c_str(),
+			addr, ep->thread_info.ep_num);
 
 		if (verbose_level)
 			printf("Creating thread for EP%02x\n",
-				ep_thread_list[i].ep_thread_info.endpoint.bEndpointAddress);
-		pthread_create(&ep_thread_list[i].ep_thread_read, 0,
-			ep_loop_read, (void *) &ep_thread_list[i].ep_thread_info);
-		pthread_create(&ep_thread_list[i].ep_thread_write, 0,
-			ep_loop_write, (void *) &ep_thread_list[i].ep_thread_info);
+				ep->thread_info.endpoint.bEndpointAddress);
+		pthread_create(&ep->thread_read, 0,
+			ep_loop_read, (void *)&ep->thread_info);
+		pthread_create(&ep->thread_write, 0,
+			ep_loop_write, (void *)&ep->thread_info);
 	}
 
 	printf("process_eps done\n");
 }
 
-void terminate_eps(int fd, int interface, int altsetting) {
-	int thread_num = host_config_desc[desired_configuration]
-			.interfaces[interface]
-			.altsetting[altsetting]
-			.interface
-			.bNumEndpoints;
+void terminate_eps(int fd, int config, int interface, int altsetting) {
+	struct raw_gadget_altsetting *alt = &host_device_desc.configs[config]
+					.interfaces[interface].altsettings[altsetting];
 
 	please_stop_eps = true;
 
-	for (int i = 0; i < thread_num; i++) {
-		if (ep_thread_list[i].ep_thread_read &&
-			pthread_join(ep_thread_list[i].ep_thread_read, NULL)) {
-			fprintf(stderr, "Error join ep_thread_read\n");
-		}
-		if (ep_thread_list[i].ep_thread_write &&
-			pthread_join(ep_thread_list[i].ep_thread_write, NULL)) {
-			fprintf(stderr, "Error join ep_thread_write\n");
-		}
+	for (int i = 0; i < alt->interface.bNumEndpoints; i++) {
+		struct raw_gadget_endpoint *ep = &alt->endpoints[i];
 
-		usb_raw_ep_disable(fd, ep_thread_list[i].ep_thread_info.ep_num);
+		if (ep->thread_read && pthread_join(ep->thread_read, NULL)) {
+			fprintf(stderr, "Error join thread_read\n");
+		}
+		if (ep->thread_write && pthread_join(ep->thread_write, NULL)) {
+			fprintf(stderr, "Error join thread_write\n");
+		}
+		ep->thread_read = 0;
+		ep->thread_write = 0;
 
-		delete ep_thread_list[i].ep_thread_info.data_queue;
-		delete ep_thread_list[i].ep_thread_info.data_mutex;
+		usb_raw_ep_disable(fd, ep->thread_info.ep_num);
+		ep->thread_info.ep_num = -1;
+
+		delete ep->thread_info.data_queue;
+		delete ep->thread_info.data_mutex;
 	}
-	delete[] ep_thread_list;
 
 	please_stop_eps = false;
 }
 
 void ep0_loop(int fd) {
 	bool set_configuration_done_once = false;
-	int previous_bConfigurationValue = -1;
-	int previous_interface = 0;
-	int previous_interface_altsetting = 0;
 
 	printf("Start for EP0, thread id(%d)\n", gettid());
 
@@ -387,81 +383,88 @@ void ep0_loop(int fd) {
 			rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
 
 			if (event.ctrl.bRequestType == 0x00 && event.ctrl.bRequest == 0x09) { // Set configuration
-				if (previous_bConfigurationValue == event.ctrl.wValue) {
-					printf("Skip changing configuration, wValue is same as previous\n");
-					continue;
+				int desired_config = -1;
+				for (int i = 0; i < host_device_desc.device.bNumConfigurations; i++) {
+					if (host_device_desc.configs[i].config.bConfigurationValue == event.ctrl.wValue) {
+						desired_config = i;
+						break;
+					}
 				}
-
-				if (event.ctrl.wValue > host_device_desc.bNumConfigurations) {
+				if (desired_config < 0) {
 					printf("[Warning] Skip changing configuration, wValue(%d) is invalid\n", event.ctrl.wValue);
 					continue;
 				}
 
+				struct raw_gadget_config *config = &host_device_desc.configs[desired_config];
+
 				if (set_configuration_done_once) { // Need to stop all threads for eps and cleanup
 					printf("Changing configuration\n");
-
-					desired_interface = 0;
-					desired_interface_altsetting = 0;
-					release_interface(desired_interface);
-
-					terminate_eps(fd, previous_interface, previous_interface_altsetting);
-
-					set_configuration(event.ctrl.wValue);
-				}
-
-				for (int i = 0; i < host_device_desc.bNumConfigurations; i++) {
-					if (host_config_desc[i].config.bConfigurationValue == event.ctrl.wValue) {
-						desired_configuration = i;
+					for (int i = 0; i < config->config.bNumInterfaces; i++) {
+						struct raw_gadget_interface *iface = &config->interfaces[i];
+						int interface_num = iface->altsettings[iface->current_altsetting]
+							.interface.bInterfaceNumber;
+						terminate_eps(fd, host_device_desc.current_config, i,
+								iface->current_altsetting);
+						release_interface(interface_num);
 					}
 				}
-				claim_interface(desired_interface);
-				process_eps(fd);
+
+				usb_raw_configure(fd);
+				set_configuration(config->config.bConfigurationValue);
+				host_device_desc.current_config = desired_config;
+
+				for (int i = 0; i < config->config.bNumInterfaces; i++) {
+					struct raw_gadget_interface *iface = &config->interfaces[i];
+					iface->current_altsetting = 0;
+					int interface_num = iface->altsettings[0].interface.bInterfaceNumber;
+					claim_interface(interface_num);
+					process_eps(fd, desired_config, i, 0);
+				}
 
 				set_configuration_done_once = true;
-				previous_bConfigurationValue = event.ctrl.wValue;
-				previous_interface = desired_interface;
-				previous_interface_altsetting = desired_interface_altsetting;
 			}
 			else if (event.ctrl.bRequestType == 0x01 && event.ctrl.bRequest == 0x0b) { // Set interface/alt_setting
-				bool process_eps_required = false;
+				struct raw_gadget_config *config =
+					&host_device_desc.configs[host_device_desc.current_config];
 
-				if (event.ctrl.wIndex >= host_config_desc[desired_configuration].config.bNumInterfaces) {
+				int desired_interface = -1;
+				for (int i = 0; i < config->config.bNumInterfaces; i++) {
+					if (config->interfaces[i].altsettings[0].interface.bInterfaceNumber ==
+							event.ctrl.wIndex) {
+						desired_interface = i;
+						break;
+					}
+				}
+				if (desired_interface < 0) {
 					printf("[Warning] Skip changing interface, wIndex(%d) is invalid\n", event.ctrl.wIndex);
 					continue;
 				}
-				if (event.ctrl.wValue >= host_config_desc[desired_configuration]
-							.interfaces[event.ctrl.wIndex].num_altsetting) {
+
+				struct raw_gadget_interface *iface = &config->interfaces[desired_interface];
+
+				int desired_altsetting = -1;
+				for (int i = 0; i < iface->num_altsettings; i++) {
+					if (iface->altsettings[i].interface.bAlternateSetting == event.ctrl.wValue) {
+						desired_altsetting = i;
+						break;
+					}
+				}
+				if (desired_altsetting < 0) {
 					printf("[Warning] Skip changing alt_setting, wValue(%d) is invalid\n", event.ctrl.wValue);
 					continue;
 				}
 
-				desired_interface = event.ctrl.wIndex;
-				desired_interface_altsetting = event.ctrl.wValue;
+				struct raw_gadget_altsetting *alt = &iface->altsettings[desired_altsetting];
 
-				if (previous_interface != desired_interface) {
-					printf("Will change interface from %d to %d\n",
-						previous_interface, desired_interface);
-					release_interface(previous_interface);
-					process_eps_required = true;
-				}
-				if (previous_interface_altsetting != desired_interface_altsetting) {
-					printf("Will Change alt_setting from %d to %d\n",
-						previous_interface_altsetting, desired_interface_altsetting);
-					process_eps_required = true;
-				}
+				printf("Changing interface/altsetting\n");
 
-				if (process_eps_required) { // Need to stop all threads for eps and cleanup
-					printf("Changing interface/altsetting\n");
-
-					terminate_eps(fd, previous_interface, previous_interface_altsetting);
-
-					if (previous_interface != desired_interface)
-						claim_interface(desired_interface);
-					process_eps(fd);
-				}
-
-				previous_interface = desired_interface;
-				previous_interface_altsetting = desired_interface_altsetting;
+				terminate_eps(fd, host_device_desc.current_config,
+					desired_interface, iface->current_altsetting);
+				set_interface_alt_setting(alt->interface.bInterfaceNumber,
+					alt->interface.bAlternateSetting);
+				process_eps(fd, host_device_desc.current_config,
+					desired_interface, desired_altsetting);
+				iface->current_altsetting = desired_altsetting;
 			}
 			else {
 				if (injection_enabled) {
@@ -498,6 +501,17 @@ void ep0_loop(int fd) {
 		}
 
 		delete[] control_data;
+	}
+
+	struct raw_gadget_config *config = &host_device_desc.configs[host_device_desc.current_config];
+
+	for (int i = 0; i < config->config.bNumInterfaces; i++) {
+		struct raw_gadget_interface *iface = &config->interfaces[i];
+		int interface_num = iface->altsettings[iface->current_altsetting]
+			.interface.bInterfaceNumber;
+		terminate_eps(fd, host_device_desc.current_config, i,
+				iface->current_altsetting);
+		release_interface(interface_num);
 	}
 
 	printf("End for EP0, thread id(%d)\n", gettid());

@@ -7,10 +7,6 @@ int verbose_level = 0;
 bool please_stop_ep0 = false;
 bool please_stop_eps = false;
 
-int desired_configuration = 1;
-int desired_interface = 0;
-int desired_interface_altsetting = 0;
-
 bool injection_enabled = false;
 std::string injection_file = "injection.json";
 Json::Value injection_config;
@@ -55,7 +51,7 @@ void handle_signal(int signum) {
 }
 
 int setup_host_usb_desc() {
-	host_device_desc = {
+	host_device_desc.device = {
 		.bLength =		device_device_desc.bLength,
 		.bDescriptorType =	device_device_desc.bDescriptorType,
 		.bcdUSB =		device_device_desc.bcdUSB,
@@ -73,7 +69,7 @@ int setup_host_usb_desc() {
 	};
 
 	int bNumConfigurations = device_device_desc.bNumConfigurations;
-	host_config_desc = new struct raw_gadget_config_descriptor[bNumConfigurations];
+	host_device_desc.configs = new struct raw_gadget_config[bNumConfigurations];
 	for (int i = 0; i < bNumConfigurations; i++) {
 		struct usb_config_descriptor temp_config = {
 			.bLength =		device_config_desc[i]->bLength,
@@ -85,20 +81,15 @@ int setup_host_usb_desc() {
 			.bmAttributes =		device_config_desc[i]->bmAttributes,
 			.bMaxPower =		device_config_desc[i]->MaxPower,
 		};
-		host_config_desc[i].config = temp_config;
-
-		// Set the first bConfigurationValue as default desired_configuration
-		// assuming that the first configuration will be set first
-		if (i == 0)
-			desired_configuration = i;
+		host_device_desc.configs[i].config = temp_config;
 
 		int bNumInterfaces = device_config_desc[i]->bNumInterfaces;
 		struct raw_gadget_interface *temp_interfaces =
 			new struct raw_gadget_interface[bNumInterfaces];
 		for (int j = 0; j < bNumInterfaces; j++) {
 			int num_altsetting = device_config_desc[i]->interface[j].num_altsetting;
-			struct raw_gadget_interface_descriptor *temp_altsettings =
-				new struct raw_gadget_interface_descriptor[num_altsetting];
+			struct raw_gadget_altsetting *temp_altsettings =
+				new struct raw_gadget_altsetting[num_altsetting];
 			for (int k = 0; k < num_altsetting; k++) {
 				const struct libusb_interface_descriptor temp_device_altsetting =
 					device_config_desc[i]->interface[j].altsetting[k];
@@ -123,8 +114,8 @@ int setup_host_usb_desc() {
 				}
 
 				int bNumEndpoints = temp_device_altsetting.bNumEndpoints;
-				struct usb_endpoint_descriptor *temp_endpoints =
-					new struct usb_endpoint_descriptor[bNumEndpoints];
+				struct raw_gadget_endpoint *temp_endpoints =
+					new struct raw_gadget_endpoint[bNumEndpoints];
 				for (int l = 0; l < bNumEndpoints; l++) {
 					struct usb_endpoint_descriptor temp_endpoint = {
 						.bLength =		temp_device_altsetting.endpoint[l].bLength,
@@ -136,15 +127,24 @@ int setup_host_usb_desc() {
 						.bRefresh =		temp_device_altsetting.endpoint[l].bRefresh,
 						.bSynchAddress = 	temp_device_altsetting.endpoint[l].bSynchAddress,
 					};
-					temp_endpoints[l] = temp_endpoint;
+					temp_endpoints[l].endpoint = temp_endpoint;
+					temp_endpoints[l].thread_read = 0;
+					temp_endpoints[l].thread_write = 0;
+					memset((void *)&temp_endpoints[l].thread_info, 0,
+						sizeof(temp_endpoints[l].thread_info));
+					temp_endpoints[l].thread_info.ep_num = -1;
 				}
 				temp_altsettings[k].endpoints = temp_endpoints;
 			}
-			temp_interfaces[j].altsetting = temp_altsettings;
-			temp_interfaces[j].num_altsetting = device_config_desc[i]->interface[j].num_altsetting;
+			temp_interfaces[j].altsettings = temp_altsettings;
+			temp_interfaces[j].num_altsettings = device_config_desc[i]->interface[j].num_altsetting;
+			temp_interfaces[j].current_altsetting = 0;
+
 		}
-		host_config_desc[i].interfaces = temp_interfaces;
+		host_device_desc.configs[i].interfaces = temp_interfaces;
 	}
+
+	host_device_desc.current_config = 0;
 
 	return 0;
 }
@@ -257,26 +257,6 @@ int main(int argc, char **argv)
 
 	ep0_loop(fd);
 
-	int thread_num = host_config_desc[desired_configuration]
-			 .interfaces[desired_interface]
-			 .altsetting[desired_interface_altsetting]
-			 .interface
-			 .bNumEndpoints;
-	for (int i = 0; i < thread_num; i++) {
-		if (ep_thread_list[i].ep_thread_read &&
-			pthread_join(ep_thread_list[i].ep_thread_read, NULL)) {
-			fprintf(stderr, "Error join ep_thread_read\n");
-		}
-		if (ep_thread_list[i].ep_thread_write &&
-			pthread_join(ep_thread_list[i].ep_thread_write, NULL)) {
-			fprintf(stderr, "Error join ep_thread_write\n");
-		}
-
-		delete[] ep_thread_list[i].ep_thread_info.data_queue;
-		delete[] ep_thread_list[i].ep_thread_info.data_mutex;
-	}
-	delete[] ep_thread_list;
-
 	close(fd);
 
 	int bNumConfigurations = device_device_desc.bNumConfigurations;
@@ -285,16 +265,14 @@ int main(int argc, char **argv)
 		for (int j = 0; j < bNumInterfaces; j++) {
 			int num_altsetting = device_config_desc[i]->interface[j].num_altsetting;
 			for (int k = 0; k < num_altsetting; k++) {
-				delete[] host_config_desc[i].interfaces[j].altsetting[k].endpoints;
+				delete[] host_device_desc.configs[i].interfaces[j].altsettings[k].endpoints;
 			}
-			delete[] host_config_desc[i].interfaces[j].altsetting;
+			delete[] host_device_desc.configs[i].interfaces[j].altsettings;
 		}
-		delete[] host_config_desc[i].interfaces;
+		delete[] host_device_desc.configs[i].interfaces;
 	}
-	delete[] host_config_desc;
+	delete[] host_device_desc.configs;
 	delete[] device_config_desc;
-
-	release_interface(0);
 
 	if (context && callback_handle != -1) {
 		libusb_hotplug_deregister_callback(context, callback_handle);

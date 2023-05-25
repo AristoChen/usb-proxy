@@ -129,6 +129,28 @@ int connect_device(int vendor_id, int product_id) {
 		return result;
 	}
 
+	int config = 0;
+	result = libusb_get_configuration(dev_handle, &config);
+	if (result != LIBUSB_SUCCESS) {
+		fprintf(stderr, "libusb_get_configuration() failed: %s\n",
+				libusb_strerror((libusb_error)result));
+		return result;
+	}
+
+	for (int i = 0; i < device_device_desc.bNumConfigurations; i++) {
+		if (device_config_desc[i]->bConfigurationValue != config)
+			continue;
+		for (int j = 0; j < device_config_desc[i]->bNumInterfaces; j++)
+			libusb_detach_kernel_driver(dev_handle, j);
+	}
+
+	result = libusb_reset_device(dev_handle);
+	if (result != LIBUSB_SUCCESS) {
+		fprintf(stderr, "libusb_reset_device() failed: %s\n",
+				libusb_strerror((libusb_error)result));
+		return result;
+	}
+
 	//check that device is responsive
 	unsigned char unused[4];
 	result = libusb_get_string_descriptor(dev_handle, 0, 0, unused, sizeof(unused));
@@ -164,19 +186,27 @@ void set_configuration(int configuration) {
 	}
 }
 
-void claim_interface(uint8_t interface) {
+void claim_interface(int interface) {
 	int result = libusb_claim_interface(dev_handle, interface);
 	if (result != LIBUSB_SUCCESS) {
 		fprintf(stderr, "Error claiming interface(%d): %s\n",
-				(unsigned)interface, libusb_strerror((libusb_error)result));
+				interface, libusb_strerror((libusb_error)result));
 	}
 }
 
-void release_interface(uint8_t interface) {
+void release_interface(int interface) {
 	int result = libusb_release_interface(dev_handle, interface);
 	if (result != LIBUSB_SUCCESS && result != LIBUSB_ERROR_NOT_FOUND) {
 		fprintf(stderr, "Error releasing interface(%d): %s\n",
-				(unsigned)interface, libusb_strerror((libusb_error)result));
+				interface, libusb_strerror((libusb_error)result));
+	}
+}
+
+void set_interface_alt_setting(int interface, int altsetting) {
+	int result = libusb_set_interface_alt_setting(dev_handle, interface, altsetting);
+	if (result != LIBUSB_SUCCESS) {
+		fprintf(stderr, "Error setting interface altsetting(%d, %d): %s\n",
+				interface, altsetting, libusb_strerror((libusb_error)result));
 	}
 }
 
@@ -274,7 +304,7 @@ void receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 			fprintf(stderr, "Isochronous(read) endpoint EP%02x unhandled.\n", endpoint);
 		break;
 	case USB_ENDPOINT_XFER_BULK:
-		*dataptr = (uint8_t *) malloc(maxPacketSize * 8);
+		*dataptr = new uint8_t[maxPacketSize * 8];
 		do {
 			result = libusb_bulk_transfer(dev_handle, endpoint, *dataptr, maxPacketSize, length, timeout);
 			if (result == LIBUSB_SUCCESS && verbose_level > 2)
@@ -286,7 +316,7 @@ void receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 		} while ((result == LIBUSB_ERROR_PIPE || result == LIBUSB_ERROR_TIMEOUT) && attempt < MAX_ATTEMPTS);
 		break;
 	case USB_ENDPOINT_XFER_INT:
-		*dataptr = (uint8_t *) malloc(maxPacketSize);
+		*dataptr = new uint8_t[maxPacketSize];
 		result = libusb_interrupt_transfer(dev_handle, endpoint, *dataptr, maxPacketSize, length, timeout);
 		if (result == LIBUSB_SUCCESS && verbose_level > 2)
 			printf("Received int data(%d) bytes\n", *length);
