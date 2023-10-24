@@ -471,15 +471,22 @@ void ep0_loop(int fd) {
 
 				struct raw_gadget_altsetting *alt = &iface->altsettings[desired_altsetting];
 
-				printf("Changing interface/altsetting\n");
-
-				terminate_eps(fd, host_device_desc.current_config,
-					desired_interface, iface->current_altsetting);
-				set_interface_alt_setting(alt->interface.bInterfaceNumber,
-					alt->interface.bAlternateSetting);
-				process_eps(fd, host_device_desc.current_config,
-					desired_interface, desired_altsetting);
-				iface->current_altsetting = desired_altsetting;
+				if (desired_altsetting == iface->current_altsetting) {
+					printf("Interface/altsetting already set\n");
+					// But lets propagate the request to the device.
+					set_interface_alt_setting(alt->interface.bInterfaceNumber,
+						alt->interface.bAlternateSetting);
+				}
+				else {
+					printf("Changing interface/altsetting\n");
+					terminate_eps(fd, host_device_desc.current_config,
+						desired_interface, iface->current_altsetting);
+					set_interface_alt_setting(alt->interface.bInterfaceNumber,
+						alt->interface.bAlternateSetting);
+					process_eps(fd, host_device_desc.current_config,
+						desired_interface, desired_altsetting);
+					iface->current_altsetting = desired_altsetting;
+				}
 			}
 			else {
 				if (injection_enabled) {
