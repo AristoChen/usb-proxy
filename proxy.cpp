@@ -369,6 +369,18 @@ void ep0_loop(int fd) {
 					}
 				}
 
+				// Some UDCs require bMaxPacketSize0 to be at least 64.
+				// Ideally, the information about UDC limitations needs to be
+				// exposed by Raw Gadget, but this is not implemented at the moment;
+				// see https://github.com/xairy/raw-gadget/issues/41.
+				if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
+				    event.ctrl.bRequest == USB_REQ_GET_DESCRIPTOR &&
+				    (event.ctrl.wValue >> 8) == USB_DT_DEVICE) {
+					struct usb_device_descriptor *dev = (struct usb_device_descriptor *)&io.data;
+					if (dev->bMaxPacketSize0 < 64)
+						dev->bMaxPacketSize0 = 64;
+				}
+
 				if (verbose_level >= 2)
 					printData(io, 0x00, "control", "in");
 
