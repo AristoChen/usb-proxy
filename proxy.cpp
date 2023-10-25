@@ -393,8 +393,6 @@ void ep0_loop(int fd) {
 			}
 		}
 		else {
-			rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
-
 			if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
 					event.ctrl.bRequest == USB_REQ_SET_CONFIGURATION) {
 				int desired_config = -1;
@@ -433,9 +431,13 @@ void ep0_loop(int fd) {
 					int interface_num = iface->altsettings[0].interface.bInterfaceNumber;
 					claim_interface(interface_num);
 					process_eps(fd, desired_config, i, 0);
+					usleep(10000); // Give threads time to spawn.
 				}
 
 				set_configuration_done_once = true;
+
+				// Ack request after spawning endpoint threads.
+				rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
 			}
 			else if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
 					event.ctrl.bRequest == USB_REQ_SET_INTERFACE) {
@@ -486,7 +488,11 @@ void ep0_loop(int fd) {
 					process_eps(fd, host_device_desc.current_config,
 						desired_interface, desired_altsetting);
 					iface->current_altsetting = desired_altsetting;
+					usleep(10000); // Give threads time to spawn.
 				}
+
+				// Ack request after spawning endpoint threads.
+				rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
 			}
 			else {
 				if (injection_enabled) {
@@ -506,6 +512,9 @@ void ep0_loop(int fd) {
 						break;
 					}
 				}
+
+				// Retrieve data for sending request to proxied device.
+				rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
 
 				memcpy(control_data, io.data, event.ctrl.wLength);
 
