@@ -394,7 +394,8 @@ void ep0_loop(int fd) {
 		else {
 			rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
 
-			if (event.ctrl.bRequestType == 0x00 && event.ctrl.bRequest == 0x09) { // Set configuration
+			if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
+					event.ctrl.bRequest == USB_REQ_SET_CONFIGURATION) {
 				int desired_config = -1;
 				for (int i = 0; i < host_device_desc.device.bNumConfigurations; i++) {
 					if (host_device_desc.configs[i].config.bConfigurationValue == event.ctrl.wValue) {
@@ -435,7 +436,8 @@ void ep0_loop(int fd) {
 
 				set_configuration_done_once = true;
 			}
-			else if (event.ctrl.bRequestType == 0x01 && event.ctrl.bRequest == 0x0b) { // Set interface/alt_setting
+			else if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
+					event.ctrl.bRequest == USB_REQ_SET_INTERFACE) {
 				struct raw_gadget_config *config =
 					&host_device_desc.configs[host_device_desc.current_config];
 
