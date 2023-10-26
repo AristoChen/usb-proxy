@@ -122,7 +122,7 @@ int connect_device(int vendor_id, int product_id) {
 		return result;
 	}
 
-	result = libusb_set_auto_detach_kernel_driver(dev_handle, 1);
+	result = libusb_set_auto_detach_kernel_driver(dev_handle, 0);
 	if (result != LIBUSB_SUCCESS) {
 		fprintf(stderr, "libusb_set_auto_detach_kernel_driver() failed: %s\n",
 				libusb_strerror((libusb_error)result));
