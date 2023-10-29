@@ -150,15 +150,15 @@ Note: The comment in the following template is only for explaining the meaning, 
             }
         ]
     },
-	"int": [
-		{
-			"ep_address": 81, // Endpoint address in Hex
-			"enable": false,
-			"content_pattern": [],
-			"replacement": ""
-		}
-	],
-	"bulk": [
+    "int": [
+        {
+            "ep_address": 81, // Endpoint address in Hex
+            "enable": false,
+            "content_pattern": [],
+            "replacement": ""
+        }
+    ],
+    "bulk": [
         {
             "ep_address": 81,
             "enable": false,
