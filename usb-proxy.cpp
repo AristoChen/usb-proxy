@@ -11,6 +11,11 @@ bool injection_enabled = false;
 std::string injection_file = "injection.json";
 Json::Value injection_config;
 
+bool customized_config_enabled = false;
+std::string customized_config_file = "config.json";
+bool reset_device_before_proxy = true;
+bool bmaxpacketsize0_must_greater_than_64 = true;
+
 void usage() {
 	printf("Usage:\n");
 	printf("\t-h/--help: print this help message\n");
@@ -20,7 +25,8 @@ void usage() {
 	printf("\t--vendor_id: use specific vendor_id of USB device\n");
 	printf("\t--product_id: use specific product_id of USB device\n");
 	printf("\t--enable_injection: enable the injection feature\n");
-	printf("\t--injection_file: specify the file that contains injection rules\n\n");
+	printf("\t--injection_file: specify the file that contains injection rules\n");
+	printf("\t--enable_customized_config: enable the customized config feature\n\n");
 	printf("* If `device` not specified, `usb-proxy` will use `dummy_udc.0` as default device.\n");
 	printf("* If `driver` not specified, `usb-proxy` will use `dummy_udc` as default driver.\n");
 	printf("* If both `vendor_id` and `product_id` not specified, `usb-proxy` will connect\n");
@@ -173,6 +179,7 @@ int main(int argc, char **argv)
 		{"product_id", required_argument, &lopt, 6},
 		{"enable_injection", no_argument, &lopt, 7},
 		{"injection_file", required_argument, &lopt, 8},
+		{"enable_customized_config", no_argument, &lopt, 9},
 		{0, 0, 0, 0}
 	};
 	while ((opt = getopt_long(argc, argv, optstring, long_options, &loidx)) != -1) {
@@ -209,6 +216,9 @@ int main(int argc, char **argv)
 		case 8:
 			injection_file = optarg;
 			break;
+		case 9:
+			customized_config_enabled = true;
+			break;
 
 		default:
 			usage();
@@ -241,6 +251,34 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		ifs.close();
+	}
+
+	if (customized_config_enabled) {
+		struct stat buffer;
+		if (stat(customized_config_file.c_str(), &buffer) != 0) {
+			printf("Customized config file %s not found\n", customized_config_file.c_str());
+			return 1;
+		}
+
+		Json::Reader jsonReader;
+		std::ifstream ifs(customized_config_file.c_str());
+		Json::Value customized_config;
+		if (jsonReader.parse(ifs, customized_config))
+			printf("Parsed customized config file: %s\n", customized_config_file.c_str());
+		else {
+			printf("Error parsing customized config file: %s\n", customized_config_file.c_str());
+			return 1;
+		}
+		ifs.close();
+
+		if (customized_config["reset_device_before_proxy"] == false) {
+			printf("reset_device_before_proxy set to false\n");
+			reset_device_before_proxy = false;
+		}
+		if (customized_config["bmaxpacketsize0_must_greater_than_64"] == false) {
+			printf("bmaxpacketsize0_must_greater_than_64 set to false\n");
+			bmaxpacketsize0_must_greater_than_64 = false;
+		}
 	}
 
 	while (connect_device(vendor_id, product_id)) {

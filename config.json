@@ -1,0 +1,4 @@
+{
+    "reset_device_before_proxy": true,
+    "bmaxpacketsize0_must_greater_than_64": true
+}

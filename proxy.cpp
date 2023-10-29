@@ -373,7 +373,8 @@ void ep0_loop(int fd) {
 				// Ideally, the information about UDC limitations needs to be
 				// exposed by Raw Gadget, but this is not implemented at the moment;
 				// see https://github.com/xairy/raw-gadget/issues/41.
-				if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
+				if (bmaxpacketsize0_must_greater_than_64 &&
+				    (event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
 				    event.ctrl.bRequest == USB_REQ_GET_DESCRIPTOR &&
 				    (event.ctrl.wValue >> 8) == USB_DT_DEVICE) {
 					struct usb_device_descriptor *dev = (struct usb_device_descriptor *)&io.data;

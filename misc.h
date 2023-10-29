@@ -21,5 +21,9 @@ extern bool injection_enabled;
 extern std::string injection_file;
 extern Json::Value injection_config;
 
+extern bool customized_config_enabled;
+extern bool reset_device_before_proxy;
+extern bool bmaxpacketsize0_must_greater_than_64;
+
 std::string hexToAscii(std::string input);
 int hexToDecimal(int input);

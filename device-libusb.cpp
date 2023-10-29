@@ -144,11 +144,13 @@ int connect_device(int vendor_id, int product_id) {
 			libusb_detach_kernel_driver(dev_handle, j);
 	}
 
-	result = libusb_reset_device(dev_handle);
-	if (result != LIBUSB_SUCCESS) {
-		fprintf(stderr, "libusb_reset_device() failed: %s\n",
-				libusb_strerror((libusb_error)result));
-		return result;
+	if (reset_device_before_proxy) {
+		result = libusb_reset_device(dev_handle);
+		if (result != LIBUSB_SUCCESS) {
+			fprintf(stderr, "libusb_reset_device() failed: %s\n",
+					libusb_strerror((libusb_error)result));
+			return result;
+		}
 	}
 
 	//check that device is responsive
