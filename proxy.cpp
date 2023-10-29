@@ -369,6 +369,18 @@ void ep0_loop(int fd) {
 					}
 				}
 
+				// Some UDCs require bMaxPacketSize0 to be at least 64.
+				// Ideally, the information about UDC limitations needs to be
+				// exposed by Raw Gadget, but this is not implemented at the moment;
+				// see https://github.com/xairy/raw-gadget/issues/41.
+				if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
+				    event.ctrl.bRequest == USB_REQ_GET_DESCRIPTOR &&
+				    (event.ctrl.wValue >> 8) == USB_DT_DEVICE) {
+					struct usb_device_descriptor *dev = (struct usb_device_descriptor *)&io.data;
+					if (dev->bMaxPacketSize0 < 64)
+						dev->bMaxPacketSize0 = 64;
+				}
+
 				if (verbose_level >= 2)
 					printData(io, 0x00, "control", "in");
 
@@ -382,7 +394,8 @@ void ep0_loop(int fd) {
 		else {
 			rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
 
-			if (event.ctrl.bRequestType == 0x00 && event.ctrl.bRequest == 0x09) { // Set configuration
+			if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
+					event.ctrl.bRequest == USB_REQ_SET_CONFIGURATION) {
 				int desired_config = -1;
 				for (int i = 0; i < host_device_desc.device.bNumConfigurations; i++) {
 					if (host_device_desc.configs[i].config.bConfigurationValue == event.ctrl.wValue) {
@@ -423,7 +436,8 @@ void ep0_loop(int fd) {
 
 				set_configuration_done_once = true;
 			}
-			else if (event.ctrl.bRequestType == 0x01 && event.ctrl.bRequest == 0x0b) { // Set interface/alt_setting
+			else if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
+					event.ctrl.bRequest == USB_REQ_SET_INTERFACE) {
 				struct raw_gadget_config *config =
 					&host_device_desc.configs[host_device_desc.current_config];
 
