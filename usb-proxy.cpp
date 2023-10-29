@@ -116,6 +116,7 @@ int setup_host_usb_desc() {
 					printf("InterfaceNumber %x AlternateSetting %x has no endpoint, skip\n",
 						temp_device_altsetting.bInterfaceNumber,
 						temp_device_altsetting.bAlternateSetting);
+					temp_altsettings[k].endpoints = NULL;
 					continue;
 				}
 
@@ -303,7 +304,9 @@ int main(int argc, char **argv)
 		for (int j = 0; j < bNumInterfaces; j++) {
 			int num_altsetting = device_config_desc[i]->interface[j].num_altsetting;
 			for (int k = 0; k < num_altsetting; k++) {
-				delete[] host_device_desc.configs[i].interfaces[j].altsettings[k].endpoints;
+				if (host_device_desc.configs[i].interfaces[j].altsettings[k].endpoints) {
+					delete[] host_device_desc.configs[i].interfaces[j].altsettings[k].endpoints;
+				}
 			}
 			delete[] host_device_desc.configs[i].interfaces[j].altsettings;
 		}
