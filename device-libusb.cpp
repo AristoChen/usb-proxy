@@ -122,7 +122,7 @@ int connect_device(int vendor_id, int product_id) {
 		return result;
 	}
 
-	result = libusb_set_auto_detach_kernel_driver(dev_handle, 1);
+	result = libusb_set_auto_detach_kernel_driver(dev_handle, 0);
 	if (result != LIBUSB_SUCCESS) {
 		fprintf(stderr, "libusb_set_auto_detach_kernel_driver() failed: %s\n",
 				libusb_strerror((libusb_error)result));
@@ -178,6 +178,14 @@ int connect_device(int vendor_id, int product_id) {
 	}
 
 	return 0;
+}
+
+void reset_device() {
+	int result = libusb_reset_device(dev_handle);
+	if (result != LIBUSB_SUCCESS) {
+		fprintf(stderr, "Error resetting device: %s\n",
+				libusb_strerror((libusb_error)result));
+	}
 }
 
 void set_configuration(int configuration) {
@@ -237,7 +245,7 @@ int control_request(const usb_ctrlrequest *setup_packet, int *nbytes,
 	return 0;
 }
 
-void send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,
+int send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,
 			int length) {
 	int transferred;
 	int attempt = 0;
@@ -289,9 +297,10 @@ void send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,
 		fprintf(stderr, "Transfer error sending on EP%02x: %s\n",
 				endpoint, libusb_strerror((libusb_error)result));
 	}
+	return result;
 }
 
-void receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
+int receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 			uint8_t **dataptr, int *length, int timeout) {
 	int result = LIBUSB_SUCCESS;
 	timeout = 0;
@@ -329,4 +338,6 @@ void receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 		fprintf(stderr, "Transfer error receiving on EP%02x: %s\n",
 				endpoint, libusb_strerror((libusb_error)result));
 	}
+
+	return result;
 }

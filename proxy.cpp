@@ -129,7 +129,16 @@ void *ep_loop_write(void *arg) {
 
 		if (ep.bEndpointAddress & USB_DIR_IN) {
 			int rv = usb_raw_ep_write(fd, (struct usb_raw_ep_io *)&io);
-			if (rv >= 0) {
+			if (rv < 0 && errno == ESHUTDOWN) {
+				printf("EP%x(%s_%s): device likely reset, stopping thread\n",
+					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+				break;
+			}
+			else if (rv < 0) {
+				perror("usb_raw_ep_write()");
+				exit(EXIT_FAILURE);
+			}
+			else {
 				printf("EP%x(%s_%s): wrote %d bytes to host\n", ep.bEndpointAddress,
 					transfer_type.c_str(), dir.c_str(), rv);
 			}
@@ -138,7 +147,12 @@ void *ep_loop_write(void *arg) {
 			int length = io.inner.length;
 			unsigned char *data = new unsigned char[length];
 			memcpy(data, io.data, length);
-			send_data(ep.bEndpointAddress, ep.bmAttributes, data, length);
+			int rv = send_data(ep.bEndpointAddress, ep.bmAttributes, data, length);
+			if (rv == LIBUSB_ERROR_NO_DEVICE) {
+				printf("EP%x(%s_%s): device likely reset, stopping thread\n",
+					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+				break;
+			}
 
 			if (data)
 				delete[] data;
@@ -176,7 +190,12 @@ void *ep_loop_read(void *arg) {
 				continue;
 			}
 
-			receive_data(ep.bEndpointAddress, ep.bmAttributes, ep.wMaxPacketSize, &data, &nbytes, 0);
+			int rv = receive_data(ep.bEndpointAddress, ep.bmAttributes, ep.wMaxPacketSize, &data, &nbytes, 0);
+			if (rv == LIBUSB_ERROR_NO_DEVICE) {
+				printf("EP%x(%s_%s): device likely reset, stopping thread\n",
+					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+				break;
+			}
 
 			if (nbytes >= 0) {
 				memcpy(io.data, data, nbytes);
@@ -204,7 +223,16 @@ void *ep_loop_read(void *arg) {
 			io.inner.length = sizeof(io.data);
 
 			int rv = usb_raw_ep_read(fd, (struct usb_raw_ep_io *)&io);
-			if (rv >= 0) {
+			if (rv < 0 && errno == ESHUTDOWN) {
+				printf("EP%x(%s_%s): device likely reset, stopping thread\n",
+					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+				break;
+			}
+			else if (rv < 0) {
+				perror("usb_raw_ep_read()");
+				exit(EXIT_FAILURE);
+			}
+			else {
 				printf("EP%x(%s_%s): read %d bytes from host\n", ep.bEndpointAddress,
 						transfer_type.c_str(), dir.c_str(), rv);
 				io.inner.length = rv;
@@ -331,6 +359,37 @@ void ep0_loop(int fd) {
 			return;
 		}
 
+		// Normally, we would only need to check for USB_RAW_EVENT_RESET to handle a reset event.
+		// However, dwc2 is buggy and it reports a disconnect event instead of a reset.
+		if (event.inner.type == USB_RAW_EVENT_RESET || event.inner.type == USB_RAW_EVENT_DISCONNECT) {
+			printf("Resetting device\n");
+			// Normally, we would need to stop endpoint threads first and only then
+			// reset the device. However, libusb does not allow interrupting queued
+			// requests submitted via sync I/O. Thus, we reset the proxied device to
+			// force libusb to interrupt the requests and allow the endpoint threads
+			// to exit on please_stop_eps checks.
+			if (set_configuration_done_once)
+				please_stop_eps = true;
+			reset_device();
+			if (set_configuration_done_once) {
+				struct raw_gadget_config *config = &host_device_desc.configs[host_device_desc.current_config];
+				printf("Stopping endpoint threads\n");
+				for (int i = 0; i < config->config.bNumInterfaces; i++) {
+					struct raw_gadget_interface *iface = &config->interfaces[i];
+					int interface_num = iface->altsettings[iface->current_altsetting]
+						.interface.bInterfaceNumber;
+					terminate_eps(fd, host_device_desc.current_config, i,
+							iface->current_altsetting);
+					release_interface(interface_num);
+					iface->current_altsetting = 0;
+				}
+				printf("Endpoint threads stopped\n");
+				host_device_desc.current_config = 0;
+				set_configuration_done_once = false;
+			}
+			continue;
+		}
+
 		if (event.inner.type != USB_RAW_EVENT_CONTROL)
 			continue;
 
@@ -393,8 +452,6 @@ void ep0_loop(int fd) {
 			}
 		}
 		else {
-			rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
-
 			if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
 					event.ctrl.bRequest == USB_REQ_SET_CONFIGURATION) {
 				int desired_config = -1;
@@ -433,9 +490,13 @@ void ep0_loop(int fd) {
 					int interface_num = iface->altsettings[0].interface.bInterfaceNumber;
 					claim_interface(interface_num);
 					process_eps(fd, desired_config, i, 0);
+					usleep(10000); // Give threads time to spawn.
 				}
 
 				set_configuration_done_once = true;
+
+				// Ack request after spawning endpoint threads.
+				rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
 			}
 			else if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
 					event.ctrl.bRequest == USB_REQ_SET_INTERFACE) {
@@ -471,15 +532,26 @@ void ep0_loop(int fd) {
 
 				struct raw_gadget_altsetting *alt = &iface->altsettings[desired_altsetting];
 
-				printf("Changing interface/altsetting\n");
+				if (desired_altsetting == iface->current_altsetting) {
+					printf("Interface/altsetting already set\n");
+					// But lets propagate the request to the device.
+					set_interface_alt_setting(alt->interface.bInterfaceNumber,
+						alt->interface.bAlternateSetting);
+				}
+				else {
+					printf("Changing interface/altsetting\n");
+					terminate_eps(fd, host_device_desc.current_config,
+						desired_interface, iface->current_altsetting);
+					set_interface_alt_setting(alt->interface.bInterfaceNumber,
+						alt->interface.bAlternateSetting);
+					process_eps(fd, host_device_desc.current_config,
+						desired_interface, desired_altsetting);
+					iface->current_altsetting = desired_altsetting;
+					usleep(10000); // Give threads time to spawn.
+				}
 
-				terminate_eps(fd, host_device_desc.current_config,
-					desired_interface, iface->current_altsetting);
-				set_interface_alt_setting(alt->interface.bInterfaceNumber,
-					alt->interface.bAlternateSetting);
-				process_eps(fd, host_device_desc.current_config,
-					desired_interface, desired_altsetting);
-				iface->current_altsetting = desired_altsetting;
+				// Ack request after spawning endpoint threads.
+				rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
 			}
 			else {
 				if (injection_enabled) {
@@ -499,6 +571,9 @@ void ep0_loop(int fd) {
 						break;
 					}
 				}
+
+				// Retrieve data for sending request to proxied device.
+				rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
 
 				memcpy(control_data, io.data, event.ctrl.wLength);
 

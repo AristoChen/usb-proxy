@@ -15,7 +15,7 @@
 
 extern int verbose_level;
 extern bool please_stop_ep0;
-extern bool please_stop_eps;
+extern volatile bool please_stop_eps;
 
 extern bool injection_enabled;
 extern std::string injection_file;

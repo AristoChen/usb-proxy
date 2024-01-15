@@ -5,7 +5,7 @@
 
 int verbose_level = 0;
 bool please_stop_ep0 = false;
-bool please_stop_eps = false;
+volatile bool please_stop_eps = false; // Use volatile to mark as atomic.
 
 bool injection_enabled = false;
 std::string injection_file = "injection.json";

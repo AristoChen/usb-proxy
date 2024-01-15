@@ -107,6 +107,10 @@ int usb_raw_ep_read(int fd, struct usb_raw_ep_io *io) {
 			// Ignore failures caused by the test that halts endpoints.
 			return rv;
 		}
+		else if (errno == ESHUTDOWN) {
+			// Ignore failures caused by device reset.
+			return rv;
+		}
 		else if (errno == EBUSY)
 			return rv;
 		perror("ioctl(USB_RAW_IOCTL_EP_READ)");
@@ -120,6 +124,10 @@ int usb_raw_ep_write(int fd, struct usb_raw_ep_io *io) {
 	if (rv < 0) {
 		if (errno == EINPROGRESS) {
 			// Ignore failures caused by the test that halts endpoints.
+			return rv;
+		}
+		else if (errno == ESHUTDOWN) {
+			// Ignore failures caused by device reset.
 			return rv;
 		}
 		else if (errno == EBUSY)
@@ -314,8 +322,20 @@ void log_event(struct usb_raw_event *event) {
 		printf("event: control, length: %u\n", event->length);
 		log_control_request((struct usb_ctrlrequest *)&event->data[0]);
 		break;
+	case USB_RAW_EVENT_SUSPEND:
+		printf("event: suspend\n");
+		break;
+	case USB_RAW_EVENT_RESUME:
+		printf("event: resume\n");
+		break;
+	case USB_RAW_EVENT_RESET:
+		printf("event: reset\n");
+		break;
+	case USB_RAW_EVENT_DISCONNECT:
+		printf("event: disconnect\n");
+		break;
 	default:
-		printf("event: unknown, length: %u\n", event->length);
+		printf("event: %d (unknown), length: %u\n", event->type, event->length);
 	}
 }
 
