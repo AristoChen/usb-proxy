@@ -14,8 +14,7 @@ int hotplug_callback(struct libusb_context *ctx __attribute__((unused)),
 			struct libusb_device *dev __attribute__((unused)),
 			libusb_hotplug_event envet __attribute__((unused)),
 			void *user_data __attribute__((unused))) {
-	printf("Hotplug event\n");
-
+	printf("Hotplug event: device disconnected, stopping proxy...\n");
 	kill(0, SIGINT);
 	return 0;
 }
