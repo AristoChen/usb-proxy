@@ -476,10 +476,14 @@ void ep0_loop(int fd) {
 					printData(io, 0x00, "control", "in");
 
 				rv = usb_raw_ep0_write(fd, (struct usb_raw_ep_io *)&io);
-				printf("ep0: transferred %d bytes (in)\n", rv);
+				if (rv < 0)
+					printf("ep0: ack failed: %d\n", rv);
+				else
+					printf("ep0: transferred %d bytes (in)\n", rv);
 			}
 			else {
 				usb_raw_ep0_stall(fd);
+				continue;
 			}
 		}
 		else {
@@ -528,6 +532,10 @@ void ep0_loop(int fd) {
 
 				// Ack request after spawning endpoint threads.
 				rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
+				if (rv < 0)
+					printf("ep0: ack failed: %d\n", rv);
+				else
+					printf("ep0: request acked\n");
 			}
 			else if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
 					event.ctrl.bRequest == USB_REQ_SET_INTERFACE) {
@@ -583,6 +591,10 @@ void ep0_loop(int fd) {
 
 				// Ack request after spawning endpoint threads.
 				rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
+				if (rv < 0)
+					printf("ep0: ack failed: %d\n", rv);
+				else
+					printf("ep0: request acked\n");
 			}
 			else {
 				if (injection_enabled) {
@@ -603,20 +615,51 @@ void ep0_loop(int fd) {
 					}
 				}
 
-				// Retrieve data for sending request to proxied device.
-				rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
+				if (event.ctrl.wLength == 0) {
+					// For 0-length request, we can ack or stall the request via
+					// Raw Gadget, depending on what the proxied device does.
 
-				memcpy(control_data, io.data, event.ctrl.wLength);
+					if (verbose_level >= 2)
+						printData(io, 0x00, "control", "out");
 
-				if (verbose_level >= 2)
-					printData(io, 0x00, "control", "out");
-
-				result = control_request(&event.ctrl, &nbytes, &control_data, USB_REQUEST_TIMEOUT);
-				if (result == 0) {
-					printf("ep0: transferred %d bytes (out)\n", rv);
+					result = control_request(&event.ctrl, &nbytes, &control_data, USB_REQUEST_TIMEOUT);
+					if (result == 0) {
+						// Ack the request.
+						rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
+						if (rv < 0)
+							printf("ep0: ack failed: %d\n", rv);
+						else
+							printf("ep0: request acked\n");
+					}
+					else {
+						// Stall the request.
+						usb_raw_ep0_stall(fd);
+						continue;
+					}
 				}
 				else {
-					usb_raw_ep0_stall(fd);
+					// For non-0-length requests, we cannot retrieve the request data
+					// without acking the request due to the Gadget subsystem limitations.
+					// Thus, we cannot stall such request for the host even if the proxied
+					// device stalls. This is not ideal but seems to work fine in practice.
+
+					// Retrieve data for sending request to proxied device
+					// (and ack the request).
+					rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
+					if (rv < 0) {
+						printf("ep0: ack failed: %d\n", rv);
+						continue;
+					}
+
+					if (verbose_level >= 2)
+						printData(io, 0x00, "control", "out");
+
+					memcpy(control_data, io.data, event.ctrl.wLength);
+
+					result = control_request(&event.ctrl, &nbytes, &control_data, USB_REQUEST_TIMEOUT);
+					if (result == 0) {
+						printf("ep0: transferred %d bytes (out)\n", rv);
+					}
 				}
 			}
 		}
