@@ -140,6 +140,11 @@ int usb_raw_ep_write(int fd, struct usb_raw_ep_io *io) {
 			// endpoint threads when shutting them down.
 			return rv;
 		}
+		else if (errno == EXDEV || errno == ENODATA) {
+			// Ignore failures caused by sending an isochronous transfer
+			// too late (dwc3 returns EXDEV, dwc2 returns ENODATA).
+			return rv;
+		}
 		else if (errno == EBUSY)
 			return rv;
 		perror("ioctl(USB_RAW_IOCTL_EP_WRITE)");

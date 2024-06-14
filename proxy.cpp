@@ -145,6 +145,11 @@ void *ep_loop_write(void *arg) {
 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
 				break;
 			}
+			if (rv < 0 && (errno == EXDEV || errno == ENODATA)) {
+				printf("EP%x(%s_%s): missed isochronous timing, ignoring transfer\n",
+					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+				continue;
+			}
 			else if (rv < 0) {
 				perror("usb_raw_ep_write()");
 				exit(EXIT_FAILURE);
