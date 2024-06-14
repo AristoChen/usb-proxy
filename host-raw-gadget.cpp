@@ -111,6 +111,11 @@ int usb_raw_ep_read(int fd, struct usb_raw_ep_io *io) {
 			// Ignore failures caused by device reset.
 			return rv;
 		}
+		else if (errno == EINTR) {
+			// Ignore failures caused by sending a signal to the
+			// endpoint threads when shutting them down.
+			return rv;
+		}
 		else if (errno == EBUSY)
 			return rv;
 		perror("ioctl(USB_RAW_IOCTL_EP_READ)");
@@ -128,6 +133,11 @@ int usb_raw_ep_write(int fd, struct usb_raw_ep_io *io) {
 		}
 		else if (errno == ESHUTDOWN) {
 			// Ignore failures caused by device reset.
+			return rv;
+		}
+		else if (errno == EINTR) {
+			// Ignore failures caused by sending a signal to the
+			// endpoint threads when shutting them down.
 			return rv;
 		}
 		else if (errno == EBUSY)

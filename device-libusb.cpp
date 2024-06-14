@@ -245,7 +245,7 @@ int control_request(const usb_ctrlrequest *setup_packet, int *nbytes,
 }
 
 int send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,
-			int length) {
+			int length, int timeout) {
 	int transferred;
 	int attempt = 0;
 	int result = LIBUSB_SUCCESS;
@@ -262,7 +262,7 @@ int send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,
 		break;
 	case USB_ENDPOINT_XFER_BULK:
 		do {
-			result = libusb_bulk_transfer(dev_handle, endpoint, dataptr, length, &transferred, 0);
+			result = libusb_bulk_transfer(dev_handle, endpoint, dataptr, length, &transferred, timeout);
 			//TODO retry transfer if incomplete
 			if (transferred != length) {
 				fprintf(stderr, "Incomplete Bulk transfer on EP%02x for attempt %d. length(%d), transferred(%d)\n",
@@ -284,7 +284,7 @@ int send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,
 					&& attempt < MAX_ATTEMPTS);
 		break;
 	case USB_ENDPOINT_XFER_INT:
-		result = libusb_interrupt_transfer(dev_handle, endpoint, dataptr, length, &transferred, 0);
+		result = libusb_interrupt_transfer(dev_handle, endpoint, dataptr, length, &transferred, timeout);
 
 		if (transferred != length)
 			fprintf(stderr, "Incomplete Interrupt transfer on EP%02x\n", endpoint);
@@ -302,7 +302,6 @@ int send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,
 int receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 			uint8_t **dataptr, int *length, int timeout) {
 	int result = LIBUSB_SUCCESS;
-	timeout = 0;
 
 	int attempt = 0;
 	switch (attributes & USB_ENDPOINT_XFERTYPE_MASK) {

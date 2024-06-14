@@ -99,6 +99,8 @@ void printData(struct usb_raw_transfer_io io, __u8 bEndpointAddress, std::string
 	printf("\n");
 }
 
+void noop_signal_handler(int) { }
+
 void *ep_loop_write(void *arg) {
 	struct thread_info thread_info = *((struct thread_info*) arg);
 	int fd = thread_info.fd;
@@ -111,6 +113,10 @@ void *ep_loop_write(void *arg) {
 
 	printf("Start writing thread for EP%02x, thread id(%d)\n",
 		ep.bEndpointAddress, gettid());
+
+	// Set a no-op handler for SIGUSR1. Sending this signal to the thread
+	// will thus interrupt a blocking ioctl call without other side-effects.
+	signal(SIGUSR1, noop_signal_handler);
 
 	while (!please_stop_eps) {
 		assert(ep_num != -1);
@@ -134,6 +140,11 @@ void *ep_loop_write(void *arg) {
 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
 				break;
 			}
+			if (rv < 0 && errno == EINTR) {
+				printf("EP%x(%s_%s): interface likely changing, stopping thread\n",
+					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+				break;
+			}
 			else if (rv < 0) {
 				perror("usb_raw_ep_write()");
 				exit(EXIT_FAILURE);
@@ -147,7 +158,7 @@ void *ep_loop_write(void *arg) {
 			int length = io.inner.length;
 			unsigned char *data = new unsigned char[length];
 			memcpy(data, io.data, length);
-			int rv = send_data(ep.bEndpointAddress, ep.bmAttributes, data, length);
+			int rv = send_data(ep.bEndpointAddress, ep.bmAttributes, data, length, USB_REQUEST_TIMEOUT);
 			if (rv == LIBUSB_ERROR_NO_DEVICE) {
 				printf("EP%x(%s_%s): device likely reset, stopping thread\n",
 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
@@ -177,6 +188,10 @@ void *ep_loop_read(void *arg) {
 	printf("Start reading thread for EP%02x, thread id(%d)\n",
 		ep.bEndpointAddress, gettid());
 
+	// Set a no-op handler for SIGUSR1. Sending this signal to the thread
+	// will thus interrupt a blocking ioctl call without other side-effects.
+	signal(SIGUSR1, noop_signal_handler);
+
 	while (!please_stop_eps) {
 		assert(ep_num != -1);
 		struct usb_raw_transfer_io io;
@@ -190,7 +205,8 @@ void *ep_loop_read(void *arg) {
 				continue;
 			}
 
-			int rv = receive_data(ep.bEndpointAddress, ep.bmAttributes, ep.wMaxPacketSize, &data, &nbytes, 0);
+			int rv = receive_data(ep.bEndpointAddress, ep.bmAttributes, usb_endpoint_maxp(&ep),
+						&data, &nbytes, USB_REQUEST_TIMEOUT);
 			if (rv == LIBUSB_ERROR_NO_DEVICE) {
 				printf("EP%x(%s_%s): device likely reset, stopping thread\n",
 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
@@ -319,6 +335,16 @@ void terminate_eps(int fd, int config, int interface, int altsetting) {
 	for (int i = 0; i < alt->interface.bNumEndpoints; i++) {
 		struct raw_gadget_endpoint *ep = &alt->endpoints[i];
 
+		// Endpoint threads might be blocked either on a Raw Gadget
+		// ioctl or on a libusb transfer handling. To interrupt the
+		// former, we send the SIGUSR1 signal to the threads. The
+		// threads have a no-op handler set for this signal, so the
+		// ioctl gets interrupted with no other side-effects.
+		// The libusb transfer handling does get interrupted directly
+		// and instead times out.
+		pthread_kill(ep->thread_read, SIGUSR1);
+		pthread_kill(ep->thread_write, SIGUSR1);
+
 		if (ep->thread_read && pthread_join(ep->thread_read, NULL)) {
 			fprintf(stderr, "Error join thread_read\n");
 		}
@@ -405,7 +431,7 @@ void ep0_loop(int fd) {
 
 		int rv = -1;
 		if (event.ctrl.bRequestType & USB_DIR_IN) {
-			result = control_request(&event.ctrl, &nbytes, &control_data, 1000);
+			result = control_request(&event.ctrl, &nbytes, &control_data, USB_REQUEST_TIMEOUT);
 			if (result == 0) {
 				memcpy(&io.data[0], control_data, nbytes);
 				io.inner.length = nbytes;
@@ -580,7 +606,7 @@ void ep0_loop(int fd) {
 				if (verbose_level >= 2)
 					printData(io, 0x00, "control", "out");
 
-				result = control_request(&event.ctrl, &nbytes, &control_data, 1000);
+				result = control_request(&event.ctrl, &nbytes, &control_data, USB_REQUEST_TIMEOUT);
 				if (result == 0) {
 					printf("ep0: transferred %d bytes (out)\n", rv);
 				}
