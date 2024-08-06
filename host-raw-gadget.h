@@ -86,33 +86,16 @@ struct usb_raw_eps_info {
 
 /*----------------------------------------------------------------------*/
 
-#define EP_MAX_PACKET_CONTROL	1024
-#define EP_MAX_PACKET_BULK	1024
-#define EP_MAX_PACKET_INT	8
+#define MAX_TRANSFER_SIZE 4096
 
 struct usb_raw_control_event {
 	struct usb_raw_event		inner;
 	struct usb_ctrlrequest		ctrl;
 };
 
-struct usb_raw_control_io {
-	struct usb_raw_ep_io		inner;
-	char				data[EP_MAX_PACKET_CONTROL];
-};
-
-struct usb_raw_bulk_io {
-	struct usb_raw_ep_io		inner;
-	char				data[EP_MAX_PACKET_BULK];
-};
-
-struct usb_raw_int_io {
-	struct usb_raw_ep_io		inner;
-	char				data[EP_MAX_PACKET_INT];
-};
-
 struct usb_raw_transfer_io {
 	struct usb_raw_ep_io		inner;
-	char				data[1024];
+	char				data[MAX_TRANSFER_SIZE];
 };
 
 /*----------------------------------------------------------------------*/

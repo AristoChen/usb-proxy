@@ -99,6 +99,8 @@ void printData(struct usb_raw_transfer_io io, __u8 bEndpointAddress, std::string
 	printf("\n");
 }
 
+void noop_signal_handler(int) { }
+
 void *ep_loop_write(void *arg) {
 	struct thread_info thread_info = *((struct thread_info*) arg);
 	int fd = thread_info.fd;
@@ -111,6 +113,10 @@ void *ep_loop_write(void *arg) {
 
 	printf("Start writing thread for EP%02x, thread id(%d)\n",
 		ep.bEndpointAddress, gettid());
+
+	// Set a no-op handler for SIGUSR1. Sending this signal to the thread
+	// will thus interrupt a blocking ioctl call without other side-effects.
+	signal(SIGUSR1, noop_signal_handler);
 
 	while (!please_stop_eps) {
 		assert(ep_num != -1);
@@ -134,6 +140,16 @@ void *ep_loop_write(void *arg) {
 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
 				break;
 			}
+			if (rv < 0 && errno == EINTR) {
+				printf("EP%x(%s_%s): interface likely changing, stopping thread\n",
+					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+				break;
+			}
+			if (rv < 0 && (errno == EXDEV || errno == ENODATA)) {
+				printf("EP%x(%s_%s): missed isochronous timing, ignoring transfer\n",
+					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+				continue;
+			}
 			else if (rv < 0) {
 				perror("usb_raw_ep_write()");
 				exit(EXIT_FAILURE);
@@ -147,7 +163,7 @@ void *ep_loop_write(void *arg) {
 			int length = io.inner.length;
 			unsigned char *data = new unsigned char[length];
 			memcpy(data, io.data, length);
-			int rv = send_data(ep.bEndpointAddress, ep.bmAttributes, data, length);
+			int rv = send_data(ep.bEndpointAddress, ep.bmAttributes, data, length, USB_REQUEST_TIMEOUT);
 			if (rv == LIBUSB_ERROR_NO_DEVICE) {
 				printf("EP%x(%s_%s): device likely reset, stopping thread\n",
 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
@@ -177,6 +193,10 @@ void *ep_loop_read(void *arg) {
 	printf("Start reading thread for EP%02x, thread id(%d)\n",
 		ep.bEndpointAddress, gettid());
 
+	// Set a no-op handler for SIGUSR1. Sending this signal to the thread
+	// will thus interrupt a blocking ioctl call without other side-effects.
+	signal(SIGUSR1, noop_signal_handler);
+
 	while (!please_stop_eps) {
 		assert(ep_num != -1);
 		struct usb_raw_transfer_io io;
@@ -190,7 +210,8 @@ void *ep_loop_read(void *arg) {
 				continue;
 			}
 
-			int rv = receive_data(ep.bEndpointAddress, ep.bmAttributes, ep.wMaxPacketSize, &data, &nbytes, 0);
+			int rv = receive_data(ep.bEndpointAddress, ep.bmAttributes, usb_endpoint_maxp(&ep),
+						&data, &nbytes, USB_REQUEST_TIMEOUT);
 			if (rv == LIBUSB_ERROR_NO_DEVICE) {
 				printf("EP%x(%s_%s): device likely reset, stopping thread\n",
 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
@@ -319,6 +340,16 @@ void terminate_eps(int fd, int config, int interface, int altsetting) {
 	for (int i = 0; i < alt->interface.bNumEndpoints; i++) {
 		struct raw_gadget_endpoint *ep = &alt->endpoints[i];
 
+		// Endpoint threads might be blocked either on a Raw Gadget
+		// ioctl or on a libusb transfer handling. To interrupt the
+		// former, we send the SIGUSR1 signal to the threads. The
+		// threads have a no-op handler set for this signal, so the
+		// ioctl gets interrupted with no other side-effects.
+		// The libusb transfer handling does get interrupted directly
+		// and instead times out.
+		pthread_kill(ep->thread_read, SIGUSR1);
+		pthread_kill(ep->thread_write, SIGUSR1);
+
 		if (ep->thread_read && pthread_join(ep->thread_read, NULL)) {
 			fprintf(stderr, "Error join thread_read\n");
 		}
@@ -405,7 +436,7 @@ void ep0_loop(int fd) {
 
 		int rv = -1;
 		if (event.ctrl.bRequestType & USB_DIR_IN) {
-			result = control_request(&event.ctrl, &nbytes, &control_data, 1000);
+			result = control_request(&event.ctrl, &nbytes, &control_data, USB_REQUEST_TIMEOUT);
 			if (result == 0) {
 				memcpy(&io.data[0], control_data, nbytes);
 				io.inner.length = nbytes;
@@ -445,10 +476,14 @@ void ep0_loop(int fd) {
 					printData(io, 0x00, "control", "in");
 
 				rv = usb_raw_ep0_write(fd, (struct usb_raw_ep_io *)&io);
-				printf("ep0: transferred %d bytes (in)\n", rv);
+				if (rv < 0)
+					printf("ep0: ack failed: %d\n", rv);
+				else
+					printf("ep0: transferred %d bytes (in)\n", rv);
 			}
 			else {
 				usb_raw_ep0_stall(fd);
+				continue;
 			}
 		}
 		else {
@@ -497,6 +532,10 @@ void ep0_loop(int fd) {
 
 				// Ack request after spawning endpoint threads.
 				rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
+				if (rv < 0)
+					printf("ep0: ack failed: %d\n", rv);
+				else
+					printf("ep0: request acked\n");
 			}
 			else if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
 					event.ctrl.bRequest == USB_REQ_SET_INTERFACE) {
@@ -552,6 +591,10 @@ void ep0_loop(int fd) {
 
 				// Ack request after spawning endpoint threads.
 				rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
+				if (rv < 0)
+					printf("ep0: ack failed: %d\n", rv);
+				else
+					printf("ep0: request acked\n");
 			}
 			else {
 				if (injection_enabled) {
@@ -572,20 +615,51 @@ void ep0_loop(int fd) {
 					}
 				}
 
-				// Retrieve data for sending request to proxied device.
-				rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
+				if (event.ctrl.wLength == 0) {
+					// For 0-length request, we can ack or stall the request via
+					// Raw Gadget, depending on what the proxied device does.
 
-				memcpy(control_data, io.data, event.ctrl.wLength);
+					if (verbose_level >= 2)
+						printData(io, 0x00, "control", "out");
 
-				if (verbose_level >= 2)
-					printData(io, 0x00, "control", "out");
-
-				result = control_request(&event.ctrl, &nbytes, &control_data, 1000);
-				if (result == 0) {
-					printf("ep0: transferred %d bytes (out)\n", rv);
+					result = control_request(&event.ctrl, &nbytes, &control_data, USB_REQUEST_TIMEOUT);
+					if (result == 0) {
+						// Ack the request.
+						rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
+						if (rv < 0)
+							printf("ep0: ack failed: %d\n", rv);
+						else
+							printf("ep0: request acked\n");
+					}
+					else {
+						// Stall the request.
+						usb_raw_ep0_stall(fd);
+						continue;
+					}
 				}
 				else {
-					usb_raw_ep0_stall(fd);
+					// For non-0-length requests, we cannot retrieve the request data
+					// without acking the request due to the Gadget subsystem limitations.
+					// Thus, we cannot stall such request for the host even if the proxied
+					// device stalls. This is not ideal but seems to work fine in practice.
+
+					// Retrieve data for sending request to proxied device
+					// (and ack the request).
+					rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
+					if (rv < 0) {
+						printf("ep0: ack failed: %d\n", rv);
+						continue;
+					}
+
+					if (verbose_level >= 2)
+						printData(io, 0x00, "control", "out");
+
+					memcpy(control_data, io.data, event.ctrl.wLength);
+
+					result = control_request(&event.ctrl, &nbytes, &control_data, USB_REQUEST_TIMEOUT);
+					if (result == 0) {
+						printf("ep0: transferred %d bytes (out)\n", rv);
+					}
 				}
 			}
 		}
