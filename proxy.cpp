@@ -247,6 +247,11 @@ void *ep_loop_read(void *arg) {
 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
 				break;
 			}
+			if (rv < 0 && errno == EINTR) {
+				printf("EP%x(%s_%s): interface likely changing, stopping thread\n",
+					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+				break;
+			}
 			if (rv < 0) {
 				perror("usb_raw_ep_read()");
 				exit(EXIT_FAILURE);
