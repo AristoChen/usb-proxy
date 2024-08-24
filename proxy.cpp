@@ -150,14 +150,12 @@ void *ep_loop_write(void *arg) {
 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
 				continue;
 			}
-			else if (rv < 0) {
+			if (rv < 0) {
 				perror("usb_raw_ep_write()");
 				exit(EXIT_FAILURE);
 			}
-			else {
-				printf("EP%x(%s_%s): wrote %d bytes to host\n", ep.bEndpointAddress,
-					transfer_type.c_str(), dir.c_str(), rv);
-			}
+			printf("EP%x(%s_%s): wrote %d bytes to host\n", ep.bEndpointAddress,
+				transfer_type.c_str(), dir.c_str(), rv);
 		}
 		else {
 			int length = io.inner.length;
@@ -249,25 +247,23 @@ void *ep_loop_read(void *arg) {
 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
 				break;
 			}
-			else if (rv < 0) {
+			if (rv < 0) {
 				perror("usb_raw_ep_read()");
 				exit(EXIT_FAILURE);
 			}
-			else {
-				printf("EP%x(%s_%s): read %d bytes from host\n", ep.bEndpointAddress,
+			printf("EP%x(%s_%s): read %d bytes from host\n", ep.bEndpointAddress,
+					transfer_type.c_str(), dir.c_str(), rv);
+			io.inner.length = rv;
+
+			if (injection_enabled)
+				injection(io, ep, transfer_type);
+
+			data_mutex->lock();
+			data_queue->push_back(io);
+			data_mutex->unlock();
+			if (verbose_level)
+				printf("EP%x(%s_%s): enqueued %d bytes to queue\n", ep.bEndpointAddress,
 						transfer_type.c_str(), dir.c_str(), rv);
-				io.inner.length = rv;
-
-				if (injection_enabled)
-					injection(io, ep, transfer_type);
-
-				data_mutex->lock();
-				data_queue->push_back(io);
-				data_mutex->unlock();
-				if (verbose_level)
-					printf("EP%x(%s_%s): enqueued %d bytes to queue\n", ep.bEndpointAddress,
-							transfer_type.c_str(), dir.c_str(), rv);
-			}
 		}
 	}
 
