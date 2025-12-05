@@ -15,9 +15,102 @@
 // Global variable to track real mouse button state from physical mouse
 std::atomic<uint8_t> g_real_mouse_button_state(0x00);
 
+// Global mouse report format (learned from real packets)
+MouseReportFormat g_mouse_format = {
+    .report_size = 0,
+    .button_offset = 0,
+    .x_offset = 0,
+    .x_size = 0,
+    .y_offset = 0,
+    .y_size = 0,
+    .scroll_offset = 0,
+    .has_report_id = false,
+    .report_id = 0,
+    .is_learned = false
+};
+
 // Function to update real mouse state (called from proxy.cpp)
 void update_real_mouse_state(uint8_t button_state) {
     g_real_mouse_button_state.store(button_state);
+}
+
+// Function to learn mouse format from real packet
+void learn_mouse_format(const uint8_t* data, size_t length) {
+    if (g_mouse_format.is_learned || length < 3) {
+        return; // Already learned or packet too small
+    }
+    
+    // Heuristic: detect common mouse report formats
+    // Most mice use: [Report ID] [Buttons] [X] [Y] [Wheel] [...]
+    
+    g_mouse_format.report_size = length;
+    
+    // Check if first byte looks like a constant report ID (e.g., 0x01, 0x02, 0x03)
+    if (data[0] <= 0x0F && data[0] != 0x00) {
+        g_mouse_format.has_report_id = true;
+        g_mouse_format.report_id = data[0];
+        g_mouse_format.button_offset = 1; // Buttons after report ID
+    } else {
+        g_mouse_format.has_report_id = false;
+        g_mouse_format.button_offset = 0; // Buttons at start
+    }
+    
+    // Common formats:
+    // Format 1 (Standard): [ID?] [Buttons] [X] [Y] [Wheel]
+    // Format 2 (Logitech): [0x02] [Buttons] [00] [X_lo] [X_hi] [Y_lo] [Y_hi] [Wheel] [00]
+    
+    if (length == 9 && g_mouse_format.has_report_id && data[0] == 0x02 && data[2] == 0x00) {
+        // Logitech format: [0x02] [Buttons] [00] [X_lo] [X_hi] [Y_lo] [Y_hi] [Wheel] [00]
+        g_mouse_format.x_offset = 3;
+        g_mouse_format.x_size = 2; // 16-bit
+        g_mouse_format.y_offset = 5;
+        g_mouse_format.y_size = 2; // 16-bit
+        g_mouse_format.scroll_offset = 7;
+        
+        if (debug_level >= 1) {
+            printf("[LEARN] Detected Logitech mouse format (9 bytes)\n");
+        }
+    } else if (length >= 4) {
+        // Standard format: coordinates right after button byte
+        int coord_start = g_mouse_format.button_offset + 1;
+        
+        // Assume X is 1-2 bytes, Y is 1-2 bytes
+        // Most modern mice use 2 bytes (16-bit) for each
+        if (length >= coord_start + 4) {
+            g_mouse_format.x_offset = coord_start;
+            g_mouse_format.x_size = 2; // Assume 16-bit
+            g_mouse_format.y_offset = coord_start + 2;
+            g_mouse_format.y_size = 2; // Assume 16-bit
+            
+            if (length > coord_start + 4) {
+                g_mouse_format.scroll_offset = coord_start + 4;
+            }
+        } else {
+            //8-bit coordinates
+            g_mouse_format.x_offset = coord_start;
+            g_mouse_format.x_size = 1;
+            g_mouse_format.y_offset = coord_start + 1;
+            g_mouse_format.y_size = 1;
+            
+            if (length > coord_start + 2) {
+                g_mouse_format.scroll_offset = coord_start + 2;
+            }
+        }
+        
+        if (debug_level >= 1) {
+            printf("[LEARN] Detected standard mouse format (%zu bytes)\n", length);
+        }
+    }
+    
+    g_mouse_format.is_learned = true;
+    
+    if (debug_level >= 1) {
+        printf("[LEARN] Mouse format: size=%d, button_offset=%d, x_offset=%d (size=%d), y_offset=%d (size=%d), scroll_offset=%d\n",
+               g_mouse_format.report_size, g_mouse_format.button_offset,
+               g_mouse_format.x_offset, g_mouse_format.x_size,
+               g_mouse_format.y_offset, g_mouse_format.y_size,
+               g_mouse_format.scroll_offset);
+    }
 }
 
 UdpServer::UdpServer(int port) : port(port), sockfd(-1), running(false), current_button_state(0x00) {}
@@ -117,38 +210,48 @@ void UdpServer::handle_command(const std::string& command) {
     if (cmd == "+move") {
         int x, y;
         if (ss >> x >> y) {
+            // Check if format has been learned
+            if (!g_mouse_format.is_learned) {
+                printf("Error: Mouse format not yet learned. Move the physical mouse first!\n");
+                return;
+            }
+            
             // Get the current REAL button state from physical mouse
             uint8_t real_button_state = g_real_mouse_button_state.load();
             
-            // Mouse report format (9 bytes, 0-indexed) - Logitech:
-            // Byte 0: 02 (magic number, constant)
-            // Byte 1: Button state (00 = no button, 01 = left click, etc.)
-            // Byte 2: 00 (padding)
-            // Byte 3: X low byte (16-bit signed little-endian)
-            // Byte 4: X high byte
-            // Byte 5: Y low byte (16-bit signed little-endian)
-            // Byte 6: Y high byte
-            // Byte 7: Scroll wheel (ff = down, 01 = up, 00 = no scroll)
-            // Byte 8: 00 (padding)
-            std::vector<uint8_t> data(9, 0);
-            data[0] = 0x02;  // Magic number
-            data[1] = real_button_state;  // Use REAL physical mouse button state
-            data[2] = 0x00;  // Padding
+            // Build packet using learned format
+            std::vector<uint8_t> data(g_mouse_format.report_size, 0);
             
-            // X coordinate: 16-bit signed little-endian (bytes 3-4)
-            data[3] = x & 0xFF;        // X low byte
-            data[4] = (x >> 8) & 0xFF; // X high byte
+            // Set report ID if present
+            if (g_mouse_format.has_report_id) {
+                data[0] = g_mouse_format.report_id;
+            }
             
-            // Y coordinate: 16-bit signed little-endian (bytes 5-6)
-            data[5] = y & 0xFF;        // Y low byte
-            data[6] = (y >> 8) & 0xFF; // Y high byte
+            // Set button state
+            data[g_mouse_format.button_offset] = real_button_state;
             
-            // Scroll wheel and padding (bytes 7-8)
-            data[7] = 0x00;  // No scroll
-            data[8] = 0x00;  // Padding
+            // Set X coordinate (handle both 8-bit and 16-bit)
+            if (g_mouse_format.x_size == 1) {
+                data[g_mouse_format.x_offset] = x & 0xFF;
+            } else {
+                // 16-bit little-endian
+                data[g_mouse_format.x_offset] = x & 0xFF;
+                data[g_mouse_format.x_offset + 1] = (x >> 8) & 0xFF;
+            }
+            
+            // Set Y coordinate (handle both 8-bit and 16-bit)
+            if (g_mouse_format.y_size == 1) {
+                data[g_mouse_format.y_offset] = y & 0xFF;
+            } else {
+                // 16-bit little-endian
+                data[g_mouse_format.y_offset] = y & 0xFF;
+                data[g_mouse_format.y_offset + 1] = (y >> 8) & 0xFF;
+            }
+            
+            // Scroll wheel remains 0 (no scroll)
             
             if (debug_level >= 2) {
-                printf("[CMD] Mouse move: X=%d, Y=%d (real button state: 0x%02x)\n", x, y, real_button_state);
+                printf("[CMD] Mouse move: X=%d, Y=%d (button: 0x%02x)\n", x, y, real_button_state);
             }
             
             inject_packet(mouse_ep, data);

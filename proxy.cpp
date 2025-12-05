@@ -241,7 +241,12 @@ void *ep_loop_read(void *arg) {
 				if ((ep.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_INT &&
 				    (ep.bEndpointAddress & USB_DIR_IN) &&
 				    nbytes >= 2 && io.data[0] == 0x02) {
-					// This looks like a mouse packet, extract button state from byte 1
+					// This looks like a mouse packet
+					
+					// Learn the format from first packet
+					learn_mouse_format(io.data, nbytes);
+					
+					// Extract button state from byte 1
 					update_real_mouse_state(io.data[1]);
 				}
 
