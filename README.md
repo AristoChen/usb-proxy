@@ -88,10 +88,13 @@ Usage:
     --product_id: use specific product_id(HEX) of USB device
     --enable_injection: enable the injection feature
     --injection_file: specify the file that contains injection rules
+    --auto_remap_endpoints: remap device endpoints to match UDC capabilities (off by default)
 ```
 - If `device` not specified, `usb-proxy` will use `dummy_udc.0` as default device.
 - If `driver` not specified, `usb-proxy` will use `dummy_udc` as default driver.
 - If both `vendor_id` and `product_id` not specified, `usb-proxy` will connect the first USB device it can find.
+- If `--auto_remap_endpoints` is set, `usb-proxy` may rewrite config/UVC descriptors and clamp isochronous
+  max packet sizes to UDC limits so the host sees the remapped endpoints.
 
 For example:
 ```shell

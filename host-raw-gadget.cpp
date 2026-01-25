@@ -65,7 +65,10 @@ void usb_raw_event_fetch(int fd, struct usb_raw_event *event) {
 int usb_raw_ep0_read(int fd, struct usb_raw_ep_io *io) {
 	int rv = ioctl(fd, USB_RAW_IOCTL_EP0_READ, io);
 	if (rv < 0) {
-		if (errno == EBUSY)
+		if (errno == EBUSY ||
+		    errno == EINVAL ||
+		    errno == EINTR ||
+		    errno == ESHUTDOWN)
 			return rv;
 		perror("ioctl(USB_RAW_IOCTL_EP0_READ)");
 		exit(EXIT_FAILURE);

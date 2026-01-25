@@ -105,6 +105,7 @@ struct thread_info {
 	int				fd;
 	int				ep_num;
 	struct usb_endpoint_descriptor 	endpoint;
+	__u8				device_bEndpointAddress;
 	std::string			transfer_type;
 	std::string			dir;
 	std::deque<usb_raw_transfer_io> *data_queue;
@@ -114,6 +115,8 @@ struct thread_info {
 
 struct raw_gadget_endpoint {
 	struct usb_endpoint_descriptor	endpoint;
+	__u8				device_bEndpointAddress;
+	__u16				udc_maxpacket_limit;
 	pthread_t			thread_read;
 	pthread_t			thread_write;
 	struct thread_info		thread_info;
