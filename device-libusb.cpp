@@ -23,7 +23,7 @@ void *hotplug_monitor(void *arg __attribute__((unused))) {
 	printf("Start hotplug_monitor thread, thread id(%d)\n", gettid());
 	while(true) {
 		usleep(100 * 1000);
-		libusb_handle_events_completed(NULL, NULL);
+		libusb_handle_events_completed(context, NULL);
 	}
 }
 
@@ -337,7 +337,7 @@ int receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 			break;
 		}
 		while (!iso_completed)
-			libusb_handle_events_completed(NULL, &iso_completed);
+			libusb_handle_events_completed(context, &iso_completed);
 		*length = 0;
 		for (int i = 0; i < iso_packets; i++)
 			*length += transfer->iso_packet_desc[i].actual_length;
