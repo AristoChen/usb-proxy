@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <atomic>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -15,7 +16,7 @@
 
 extern int verbose_level;
 extern bool please_stop_ep0;
-extern volatile bool please_stop_eps;
+extern std::atomic<bool> please_stop_eps;
 
 extern bool injection_enabled;
 extern std::string injection_file;

@@ -1,3 +1,4 @@
+#include <atomic>
 #include <pthread.h>
 #include <mutex>
 #include <deque>
@@ -108,6 +109,7 @@ struct thread_info {
 	std::string			dir;
 	std::deque<usb_raw_transfer_io> *data_queue;
 	std::mutex			*data_mutex;
+	std::atomic<bool>		*please_stop;
 };
 
 struct raw_gadget_endpoint {

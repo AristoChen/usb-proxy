@@ -1,3 +1,5 @@
+#include <atomic>
+
 #include "host-raw-gadget.h"
 #include "device-libusb.h"
 #include "proxy.h"
@@ -5,7 +7,7 @@
 
 int verbose_level = 0;
 bool please_stop_ep0 = false;
-volatile bool please_stop_eps = false; // Use volatile to mark as atomic.
+std::atomic<bool> please_stop_eps(false);
 
 bool injection_enabled = false;
 std::string injection_file = "injection.json";

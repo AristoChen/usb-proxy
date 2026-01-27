@@ -110,6 +110,7 @@ void *ep_loop_write(void *arg) {
 	std::string dir = thread_info.dir;
 	std::deque<usb_raw_transfer_io> *data_queue = thread_info.data_queue;
 	std::mutex *data_mutex = thread_info.data_mutex;
+	std::atomic<bool> *please_stop = thread_info.please_stop;
 
 	printf("Start writing thread for EP%02x, thread id(%d)\n",
 		ep.bEndpointAddress, gettid());
@@ -118,14 +119,16 @@ void *ep_loop_write(void *arg) {
 	// will thus interrupt a blocking ioctl call without other side-effects.
 	signal(SIGUSR1, noop_signal_handler);
 
-	while (!please_stop_eps) {
+	// Check both per-endpoint flag (interface change) and global flag (device reset)
+	while (!*please_stop && !please_stop_eps) {
 		assert(ep_num != -1);
-		if (data_queue->size() == 0) {
+
+		data_mutex->lock();
+		if (data_queue->empty()) {
+			data_mutex->unlock();
 			usleep(100);
 			continue;
 		}
-
-		data_mutex->lock();
 		struct usb_raw_transfer_io io = data_queue->front();
 		data_queue->pop_front();
 		data_mutex->unlock();
@@ -187,6 +190,7 @@ void *ep_loop_read(void *arg) {
 	std::string dir = thread_info.dir;
 	std::deque<usb_raw_transfer_io> *data_queue = thread_info.data_queue;
 	std::mutex *data_mutex = thread_info.data_mutex;
+	std::atomic<bool> *please_stop = thread_info.please_stop;
 
 	printf("Start reading thread for EP%02x, thread id(%d)\n",
 		ep.bEndpointAddress, gettid());
@@ -195,7 +199,8 @@ void *ep_loop_read(void *arg) {
 	// will thus interrupt a blocking ioctl call without other side-effects.
 	signal(SIGUSR1, noop_signal_handler);
 
-	while (!please_stop_eps) {
+	// Check both per-endpoint flag (interface change) and global flag (device reset)
+	while (!*please_stop && !please_stop_eps) {
 		assert(ep_num != -1);
 		struct usb_raw_transfer_io io;
 
@@ -203,7 +208,10 @@ void *ep_loop_read(void *arg) {
 			unsigned char *data = NULL;
 			int nbytes = -1;
 
-			if (data_queue->size() >= 32) {
+			data_mutex->lock();
+			bool queue_full = data_queue->size() >= 32;
+			data_mutex->unlock();
+			if (queue_full) {
 				usleep(200);
 				continue;
 			}
@@ -293,6 +301,7 @@ void process_eps(int fd, int config, int interface, int altsetting) {
 		ep->thread_info.endpoint = ep->endpoint;
 		ep->thread_info.data_queue = new std::deque<usb_raw_transfer_io>;
 		ep->thread_info.data_mutex = new std::mutex;
+		ep->thread_info.please_stop = new std::atomic<bool>(false);
 
 		switch (usb_endpoint_type(&ep->endpoint)) {
 		case USB_ENDPOINT_XFER_ISOC:
@@ -336,38 +345,46 @@ void terminate_eps(int fd, int config, int interface, int altsetting) {
 	struct raw_gadget_altsetting *alt = &host_device_desc.configs[config]
 					.interfaces[interface].altsettings[altsetting];
 
-	please_stop_eps = true;
-
+	// Phase 1: Signal all threads to stop and interrupt blocking calls.
+	// Set per-endpoint stop flags (not global - only affects this interface's threads).
+	// Send SIGUSR1 to interrupt threads blocked on Raw Gadget ioctls.
+	// The threads have a no-op handler for this signal, so the ioctl gets
+	// interrupted with no other side-effects. Libusb transfer handling
+	// does not get interrupted directly and instead times out.
 	for (int i = 0; i < alt->interface.bNumEndpoints; i++) {
 		struct raw_gadget_endpoint *ep = &alt->endpoints[i];
+		if (ep->thread_info.please_stop)
+			*ep->thread_info.please_stop = true;
+		if (ep->thread_read)
+			pthread_kill(ep->thread_read, SIGUSR1);
+		if (ep->thread_write)
+			pthread_kill(ep->thread_write, SIGUSR1);
+	}
 
-		// Endpoint threads might be blocked either on a Raw Gadget
-		// ioctl or on a libusb transfer handling. To interrupt the
-		// former, we send the SIGUSR1 signal to the threads. The
-		// threads have a no-op handler set for this signal, so the
-		// ioctl gets interrupted with no other side-effects.
-		// The libusb transfer handling does get interrupted directly
-		// and instead times out.
-		pthread_kill(ep->thread_read, SIGUSR1);
-		pthread_kill(ep->thread_write, SIGUSR1);
-
-		if (ep->thread_read && pthread_join(ep->thread_read, NULL)) {
+	// Phase 2: Wait for all threads to exit.
+	for (int i = 0; i < alt->interface.bNumEndpoints; i++) {
+		struct raw_gadget_endpoint *ep = &alt->endpoints[i];
+		if (ep->thread_read && pthread_join(ep->thread_read, NULL))
 			fprintf(stderr, "Error join thread_read\n");
-		}
-		if (ep->thread_write && pthread_join(ep->thread_write, NULL)) {
+		if (ep->thread_write && pthread_join(ep->thread_write, NULL))
 			fprintf(stderr, "Error join thread_write\n");
-		}
 		ep->thread_read = 0;
 		ep->thread_write = 0;
+	}
 
+	// Phase 3: Clean up resources after all threads have exited.
+	for (int i = 0; i < alt->interface.bNumEndpoints; i++) {
+		struct raw_gadget_endpoint *ep = &alt->endpoints[i];
 		usb_raw_ep_disable(fd, ep->thread_info.ep_num);
 		ep->thread_info.ep_num = -1;
 
 		delete ep->thread_info.data_queue;
 		delete ep->thread_info.data_mutex;
+		delete ep->thread_info.please_stop;
+		ep->thread_info.data_queue = nullptr;
+		ep->thread_info.data_mutex = nullptr;
+		ep->thread_info.please_stop = nullptr;
 	}
-
-	please_stop_eps = false;
 }
 
 void ep0_loop(int fd) {
@@ -416,6 +433,7 @@ void ep0_loop(int fd) {
 					iface->current_altsetting = 0;
 				}
 				printf("Endpoint threads stopped\n");
+				please_stop_eps = false;
 				host_device_desc.current_config = 0;
 				set_configuration_done_once = false;
 			}
