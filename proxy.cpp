@@ -452,9 +452,6 @@ void *ep_loop_read(void *arg) {
 		struct usb_raw_transfer_io io;
 
 		if (ep.bEndpointAddress & USB_DIR_IN) {
-			unsigned char *data = NULL;
-			int nbytes = -1;
-
 			data_mutex->lock();
 			bool queue_full = data_queue->size() >= 32;
 			data_mutex->unlock();
@@ -463,34 +460,92 @@ void *ep_loop_read(void *arg) {
 				continue;
 			}
 
-			int rv = receive_data(thread_info.device_bEndpointAddress, ep.bmAttributes,
-						usb_endpoint_maxp(&ep),
-						&data, &nbytes, USB_REQUEST_TIMEOUT);
-			if (rv == LIBUSB_ERROR_NO_DEVICE) {
-				printf("EP%x(%s_%s): device likely reset, stopping thread\n",
-					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
-				break;
-			}
+			if ((ep.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_ISOC) {
+				struct iso_batch_result batch;
+				int rv = receive_iso_data_batched(thread_info.device_bEndpointAddress,
+								usb_endpoint_maxp(&ep),
+								&batch, iso_batch_size, USB_REQUEST_TIMEOUT);
+				if (rv == LIBUSB_ERROR_NO_DEVICE) {
+					printf("EP%x(%s_%s): device likely reset, stopping thread\n",
+						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+					break;
+				}
 
-			if (nbytes >= 0) {
-				memcpy(io.data, data, nbytes);
-				io.inner.ep = ep_num;
-				io.inner.flags = 0;
-				io.inner.length = nbytes;
+				if (rv != LIBUSB_SUCCESS || !batch.success) {
+					if (batch.buffer)
+						delete[] batch.buffer;
+					continue;
+				}
 
-				if (injection_enabled)
-					injection(io, thread_info.device_bEndpointAddress, transfer_type);
+				int packets_enqueued = 0;
+				for (int i = 0; i < batch.num_packets; i++) {
+					if (batch.packets[i].status != LIBUSB_TRANSFER_COMPLETED) {
+						if (verbose_level > 1)
+							printf("EP%x(%s_%s): packet %d status %d, skipping\n",
+								ep.bEndpointAddress, transfer_type.c_str(),
+								dir.c_str(), i, batch.packets[i].status);
+						continue;
+					}
+					if (batch.packets[i].actual_length <= 0)
+						continue;
 
-				data_mutex->lock();
-				data_queue->push_back(io);
-				data_mutex->unlock();
+					memcpy(io.data, batch.packets[i].data, batch.packets[i].actual_length);
+					io.inner.ep = ep_num;
+					io.inner.flags = 0;
+					io.inner.length = batch.packets[i].actual_length;
+
+					if (injection_enabled)
+						injection(io, thread_info.device_bEndpointAddress, transfer_type);
+
+					data_mutex->lock();
+					data_queue->push_back(io);
+					data_mutex->unlock();
+					packets_enqueued++;
+				}
 				if (verbose_level)
-					printf("EP%x(%s_%s): enqueued %d bytes to queue\n", ep.bEndpointAddress,
-							transfer_type.c_str(), dir.c_str(), nbytes);
-			}
+					printf("EP%x(%s_%s): enqueued %d/%d packets (%d bytes total)\n",
+						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str(),
+						packets_enqueued, batch.num_packets, batch.total_length);
 
-			if (data)
-				delete[] data;
+				if (batch.buffer)
+					delete[] batch.buffer;
+			}
+			else {
+				// Non-isochronous: use original single-packet path
+				unsigned char *data = NULL;
+				int nbytes = -1;
+
+				int rv = receive_data(thread_info.device_bEndpointAddress, ep.bmAttributes,
+							usb_endpoint_maxp(&ep),
+							&data, &nbytes, USB_REQUEST_TIMEOUT);
+				if (rv == LIBUSB_ERROR_NO_DEVICE) {
+					printf("EP%x(%s_%s): device likely reset, stopping thread\n",
+						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+					if (data)
+						delete[] data;
+					break;
+				}
+
+				if (nbytes >= 0) {
+					memcpy(io.data, data, nbytes);
+					io.inner.ep = ep_num;
+					io.inner.flags = 0;
+					io.inner.length = nbytes;
+
+					if (injection_enabled)
+						injection(io, thread_info.device_bEndpointAddress, transfer_type);
+
+					data_mutex->lock();
+					data_queue->push_back(io);
+					data_mutex->unlock();
+					if (verbose_level)
+						printf("EP%x(%s_%s): enqueued %d bytes to queue\n", ep.bEndpointAddress,
+								transfer_type.c_str(), dir.c_str(), nbytes);
+				}
+
+				if (data)
+					delete[] data;
+			}
 		}
 		else {
 			io.inner.ep = ep_num;

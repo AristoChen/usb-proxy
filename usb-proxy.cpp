@@ -20,6 +20,7 @@ std::string customized_config_file = "config.json";
 bool reset_device_before_proxy = true;
 bool bmaxpacketsize0_must_greater_than_64 = true;
 bool auto_remap_endpoints = false;
+int iso_batch_size = ISO_BATCH_SIZE_DEFAULT;
 
 void usage() {
 	printf("Usage:\n");
@@ -31,8 +32,10 @@ void usage() {
 	printf("\t--product_id: use specific product_id of USB device\n");
 	printf("\t--enable_injection: enable the injection feature\n");
 	printf("\t--injection_file: specify the file that contains injection rules\n");
-	printf("\t--enable_customized_config: enable the customized config feature\n\n");
-	printf("\t--auto_remap_endpoints: enable endpoint remapping when UDC can't use descriptors directly\n\n");
+	printf("\t--enable_customized_config: enable the customized config feature\n");
+	printf("\t--auto_remap_endpoints: enable endpoint remapping when UDC can't use descriptors directly\n");
+	printf("\t--iso_batch_size N: number of isochronous packets per transfer (1-%d, default %d)\n\n",
+		ISO_BATCH_SIZE_MAX, ISO_BATCH_SIZE_DEFAULT);
 	printf("* If `device` not specified, `usb-proxy` will use `dummy_udc.0` as default device.\n");
 	printf("* If `driver` not specified, `usb-proxy` will use `dummy_udc` as default driver.\n");
 	printf("* If both `vendor_id` and `product_id` not specified, `usb-proxy` will connect\n");
@@ -356,6 +359,7 @@ int main(int argc, char **argv)
 		{"injection_file", required_argument, &lopt, 8},
 		{"enable_customized_config", no_argument, &lopt, 9},
 		{"auto_remap_endpoints", no_argument, &lopt, 10},
+		{"iso_batch_size", required_argument, &lopt, 11},
 		{0, 0, 0, 0}
 	};
 	while ((opt = getopt_long(argc, argv, optstring, long_options, &loidx)) != -1) {
@@ -398,6 +402,14 @@ int main(int argc, char **argv)
 		case 10:
 			auto_remap_endpoints = true;
 			printf("Automatic endpoint remapping enabled\n");
+			break;
+		case 11:
+			iso_batch_size = std::stoi(optarg);
+			if (iso_batch_size < 1)
+				iso_batch_size = 1;
+			if (iso_batch_size > ISO_BATCH_SIZE_MAX)
+				iso_batch_size = ISO_BATCH_SIZE_MAX;
+			printf("Isochronous batch size set to %d\n", iso_batch_size);
 			break;
 
 		default:
