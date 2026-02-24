@@ -41,6 +41,32 @@ static uint16_t find_udc_maxpacket_for_interface(uint8_t interface_number)
 	return max_limit;
 }
 
+// Translate a gadget-side endpoint address back to the physical device's
+// endpoint address. Needed for endpoint-directed class requests (e.g.,
+// USB Audio SET_CUR for sampling frequency) when endpoint remapping is active.
+static uint16_t remap_endpoint_for_device(uint16_t gadget_ep_addr)
+{
+	if (!auto_remap_endpoints)
+		return gadget_ep_addr;
+
+	struct raw_gadget_config *config =
+		&host_device_desc.configs[host_device_desc.current_config];
+
+	for (int i = 0; i < config->config.bNumInterfaces; i++) {
+		struct raw_gadget_interface *iface = &config->interfaces[i];
+		for (int j = 0; j < iface->num_altsettings; j++) {
+			struct raw_gadget_altsetting *alt = &iface->altsettings[j];
+			for (int k = 0; k < alt->interface.bNumEndpoints; k++) {
+				struct raw_gadget_endpoint *ep = &alt->endpoints[k];
+				if (ep->endpoint.bEndpointAddress == (uint8_t)gadget_ep_addr)
+					return ep->device_bEndpointAddress;
+			}
+		}
+	}
+
+	return gadget_ep_addr;
+}
+
 static void clamp_uvc_probe_commit(const usb_ctrlrequest *ctrl,
 				   struct usb_raw_transfer_io &io)
 {
@@ -788,6 +814,17 @@ void ep0_loop(int fd) {
 		int nbytes = 0;
 		int result = 0;
 		unsigned char *control_data = new unsigned char[event.ctrl.wLength];
+
+		// For endpoint-directed class requests, translate the gadget-side
+		// endpoint address in wIndex to the physical device's address.
+		if ((event.ctrl.bRequestType & USB_RECIP_MASK) == USB_RECIP_ENDPOINT) {
+			uint16_t device_ep = remap_endpoint_for_device(event.ctrl.wIndex & 0xff);
+			if (device_ep != (event.ctrl.wIndex & 0xff)) {
+				printf("ep0: remapping wIndex endpoint 0x%02x -> 0x%02x\n",
+					event.ctrl.wIndex & 0xff, device_ep);
+				event.ctrl.wIndex = (event.ctrl.wIndex & 0xff00) | device_ep;
+			}
+		}
 
 		int rv = -1;
 		if (event.ctrl.bRequestType & USB_DIR_IN) {
