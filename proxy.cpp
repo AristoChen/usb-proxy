@@ -148,6 +148,9 @@ static void rewrite_descriptor_addresses(uint8_t descriptor_type, uint8_t descri
 					data[offset + 4] = maxp & 0xff;
 					data[offset + 5] = (maxp >> 8) & 0xff;
 				}
+				// Also rewrite bInterval (offset 6 in endpoint descriptor).
+				if (offset + 7 <= length)
+					data[offset + 6] = ep->endpoint.bInterval;
 				current_endpoint++;
 			}
 		}

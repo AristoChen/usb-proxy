@@ -21,6 +21,7 @@ bool reset_device_before_proxy = true;
 bool bmaxpacketsize0_must_greater_than_64 = true;
 bool auto_remap_endpoints = false;
 int iso_batch_size = ISO_BATCH_SIZE_DEFAULT;
+enum usb_device_speed device_speed = USB_SPEED_HIGH;
 
 void usage() {
 	printf("Usage:\n");
@@ -309,6 +310,34 @@ int setup_host_usb_desc() {
 						.bRefresh =		temp_device_altsetting.endpoint[l].bRefresh,
 						.bSynchAddress = 	temp_device_altsetting.endpoint[l].bSynchAddress,
 					};
+					// When a full-speed device is proxied through a high-speed
+					// gadget, convert isochronous bInterval from FS (ms) to HS
+					// (125µs microframes): HS interval = 2^(bInterval-1) * 125µs.
+					// FS bInterval=1 (1ms) → HS bInterval=4 (1ms).
+					if (device_speed == USB_SPEED_FULL &&
+					    (temp_endpoint.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK)
+					     == USB_ENDPOINT_XFER_ISOC) {
+						uint8_t fs_interval = temp_endpoint.bInterval;
+						// Convert ms to nearest 125µs exponent:
+						// fs_interval ms = fs_interval * 8 microframes
+						// 2^(n-1) = fs_interval * 8 → n = log2(fs_interval*8) + 1
+						// For bInterval=1: n = log2(8)+1 = 4
+						uint8_t hs_interval = 4;
+						if (fs_interval > 1) {
+							int val = fs_interval * 8;
+							hs_interval = 1;
+							while (val > 1) {
+								val >>= 1;
+								hs_interval++;
+							}
+						}
+						if (hs_interval > 16)
+							hs_interval = 16;
+						printf("Converting ISO bInterval %d (FS ms) -> %d (HS 125us)\n",
+							fs_interval, hs_interval);
+						temp_endpoint.bInterval = hs_interval;
+					}
+
 					temp_endpoints[l].endpoint = temp_endpoint;
 					temp_endpoints[l].device_bEndpointAddress = temp_endpoint.bEndpointAddress;
 					temp_endpoints[l].udc_maxpacket_limit = 0;
@@ -478,10 +507,38 @@ int main(int argc, char **argv)
 	}
 	printf("Device opened successfully\n");
 
+	// Detect physical device speed.
+	int libusb_speed = libusb_get_device_speed(libusb_get_device(dev_handle));
+	switch (libusb_speed) {
+	case LIBUSB_SPEED_LOW:
+		device_speed = USB_SPEED_LOW;
+		printf("Device speed: Low Speed (1.5Mbps)\n");
+		break;
+	case LIBUSB_SPEED_FULL:
+		device_speed = USB_SPEED_FULL;
+		printf("Device speed: Full Speed (12Mbps)\n");
+		break;
+	case LIBUSB_SPEED_HIGH:
+		device_speed = USB_SPEED_HIGH;
+		printf("Device speed: High Speed (480Mbps)\n");
+		break;
+	case LIBUSB_SPEED_SUPER:
+	case LIBUSB_SPEED_SUPER_PLUS:
+		device_speed = USB_SPEED_SUPER;
+		printf("Device speed: SuperSpeed (5Gbps+)\n");
+		break;
+	default:
+		device_speed = USB_SPEED_HIGH;
+		printf("Device speed: Unknown, defaulting to High Speed\n");
+		break;
+	}
+
 	setup_host_usb_desc();
 	printf("Setup USB config successfully\n");
 
 	int fd = usb_raw_open();
+	// Always use USB_SPEED_HIGH for the gadget; some UDCs (e.g., musb-hdrc)
+	// reject lower speeds. We compensate by adjusting bInterval below.
 	usb_raw_init(fd, USB_SPEED_HIGH, driver, device);
 	usb_raw_run(fd);
 
