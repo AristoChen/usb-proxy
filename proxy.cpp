@@ -4,6 +4,252 @@
 #include "device-libusb.h"
 #include "misc.h"
 
+// UVC Video Streaming interface selectors (USB Video Class spec)
+#define UVC_VS_PROBE_CONTROL		0x01
+#define UVC_VS_COMMIT_CONTROL		0x02
+#define UVC_VS_INPUT_HEADER		0x01
+#define UVC_SC_VIDEOSTREAMING		0x02
+
+// Offset of dwMaxPayloadTransferSize in UVC probe/commit response
+#define UVC_PROBE_MAX_PAYLOAD_OFFSET	22
+
+extern bool auto_remap_endpoints;
+
+static uint16_t find_udc_maxpacket_for_interface(uint8_t interface_number)
+{
+	struct raw_gadget_config *config =
+		&host_device_desc.configs[host_device_desc.current_config];
+	uint16_t max_limit = 0;
+
+	for (int i = 0; i < config->config.bNumInterfaces; i++) {
+		struct raw_gadget_interface *iface = &config->interfaces[i];
+		for (int j = 0; j < iface->num_altsettings; j++) {
+			struct raw_gadget_altsetting *alt = &iface->altsettings[j];
+			if (alt->interface.bInterfaceNumber != interface_number)
+				continue;
+			for (int k = 0; k < alt->interface.bNumEndpoints; k++) {
+				struct raw_gadget_endpoint *ep = &alt->endpoints[k];
+				if (usb_endpoint_type(&ep->endpoint) != USB_ENDPOINT_XFER_ISOC)
+					continue;
+				if (ep->udc_maxpacket_limit &&
+				    ep->udc_maxpacket_limit > max_limit)
+					max_limit = ep->udc_maxpacket_limit;
+			}
+		}
+	}
+
+	return max_limit;
+}
+
+static void clamp_uvc_probe_commit(const usb_ctrlrequest *ctrl,
+				   struct usb_raw_transfer_io &io)
+{
+	if (!auto_remap_endpoints)
+		return;
+	if ((ctrl->bRequestType & USB_TYPE_MASK) != USB_TYPE_CLASS)
+		return;
+
+	uint8_t interface_number = ctrl->wIndex & 0xff;
+	uint8_t selector = ctrl->wValue >> 8;
+	if (selector != UVC_VS_PROBE_CONTROL && selector != UVC_VS_COMMIT_CONTROL)
+		return;
+
+	uint16_t maxp = find_udc_maxpacket_for_interface(interface_number);
+	if (!maxp)
+		return;
+
+	if (io.inner.length < UVC_PROBE_MAX_PAYLOAD_OFFSET + 4)
+		return;
+
+	uint8_t *payload = (uint8_t *)io.data;
+	uint8_t *p = payload + UVC_PROBE_MAX_PAYLOAD_OFFSET;
+	uint32_t max_payload = (uint32_t)p[0] |
+		((uint32_t)p[1] << 8) |
+		((uint32_t)p[2] << 16) |
+		((uint32_t)p[3] << 24);
+	if (max_payload > maxp) {
+		p[0] = maxp & 0xff;
+		p[1] = (maxp >> 8) & 0xff;
+		p[2] = 0;
+		p[3] = 0;
+	}
+}
+
+static struct raw_gadget_altsetting *find_altsetting(struct raw_gadget_config *config,
+						    uint8_t interface_number,
+						    uint8_t alt_setting)
+{
+	for (int i = 0; i < config->config.bNumInterfaces; i++) {
+		struct raw_gadget_interface *iface = &config->interfaces[i];
+		for (int j = 0; j < iface->num_altsettings; j++) {
+			struct raw_gadget_altsetting *alt = &iface->altsettings[j];
+			if (alt->interface.bInterfaceNumber == interface_number &&
+			    alt->interface.bAlternateSetting == alt_setting)
+				return alt;
+		}
+	}
+	return NULL;
+}
+
+static struct raw_gadget_endpoint *find_first_streaming_ep(struct raw_gadget_config *config,
+							  uint8_t interface_number)
+{
+	for (int i = 0; i < config->config.bNumInterfaces; i++) {
+		struct raw_gadget_interface *iface = &config->interfaces[i];
+		for (int j = 0; j < iface->num_altsettings; j++) {
+			struct raw_gadget_altsetting *alt = &iface->altsettings[j];
+			if (alt->interface.bInterfaceNumber != interface_number)
+				continue;
+			if (alt->interface.bNumEndpoints > 0)
+				return &alt->endpoints[0];
+		}
+	}
+	return NULL;
+}
+
+static void rewrite_descriptor_addresses(uint8_t descriptor_type, uint8_t descriptor_index,
+					 uint8_t *data, size_t length)
+{
+	if (!auto_remap_endpoints)
+		return;
+
+	if (descriptor_type != USB_DT_CONFIG &&
+	    descriptor_type != USB_DT_OTHER_SPEED_CONFIG)
+		return;
+
+	if (descriptor_index >= host_device_desc.device.bNumConfigurations)
+		return;
+
+	struct raw_gadget_config *config = &host_device_desc.configs[descriptor_index];
+	struct raw_gadget_altsetting *current_alt = NULL;
+	int current_endpoint = 0;
+
+	size_t offset = 0;
+	while (offset + 2 <= length) {
+		uint8_t dlen = data[offset];
+		if (!dlen)
+			break;
+		if (offset + dlen > length)
+			break;
+
+		uint8_t dtype = data[offset + 1];
+		if (dtype == USB_DT_INTERFACE) {
+			uint8_t interface_number = data[offset + 2];
+			uint8_t alt_setting = data[offset + 3];
+			current_alt = find_altsetting(config, interface_number, alt_setting);
+			current_endpoint = 0;
+		}
+		else if (dtype == USB_DT_ENDPOINT) {
+			if (current_alt && current_endpoint < current_alt->interface.bNumEndpoints) {
+				struct raw_gadget_endpoint *ep = &current_alt->endpoints[current_endpoint];
+				data[offset + 2] = ep->endpoint.bEndpointAddress;
+				if (offset + 6 < length) {
+					uint16_t maxp = ep->endpoint.wMaxPacketSize;
+					data[offset + 4] = maxp & 0xff;
+					data[offset + 5] = (maxp >> 8) & 0xff;
+				}
+				current_endpoint++;
+			}
+		}
+		else if (dtype == USB_DT_CS_INTERFACE) {
+			if (current_alt && current_alt->interface.bInterfaceClass == USB_CLASS_VIDEO) {
+				uint8_t subtype = data[offset + 2];
+				// VideoStreaming Input Header descriptor: bEndpointAddress at offset 6.
+				if (subtype == UVC_VS_INPUT_HEADER &&
+				    current_alt->interface.bInterfaceSubClass == UVC_SC_VIDEOSTREAMING) {
+					if (offset + 6 < length) {
+						struct raw_gadget_endpoint *ep = NULL;
+						if (current_alt->interface.bNumEndpoints > 0) {
+							ep = &current_alt->endpoints[0];
+						}
+						else {
+							ep = find_first_streaming_ep(config,
+								current_alt->interface.bInterfaceNumber);
+						}
+						if (ep)
+							data[offset + 6] = ep->endpoint.bEndpointAddress;
+					}
+				}
+			}
+		}
+
+		offset += dlen;
+	}
+}
+
+static void maybe_override_descriptor(struct usb_ctrlrequest *ctrl,
+				      struct usb_raw_transfer_io &io)
+{
+	if (!auto_remap_endpoints)
+		return;
+	if ((ctrl->bRequestType & USB_TYPE_MASK) != USB_TYPE_STANDARD)
+		return;
+	if (ctrl->bRequest != USB_REQ_GET_DESCRIPTOR)
+		return;
+
+	uint8_t descriptor_type = ctrl->wValue >> 8;
+	uint8_t descriptor_index = ctrl->wValue & 0xff;
+	rewrite_descriptor_addresses(descriptor_type, descriptor_index,
+				     (uint8_t *)io.data, io.inner.length);
+}
+
+// Returns the index of the best altsetting that fits UDC limits, or -1 if none.
+// The desired_altsetting is returned directly if remapping is disabled or if it has no endpoints.
+static int find_best_compatible_altsetting(struct raw_gadget_interface *iface,
+					   int desired_interface,
+					   int desired_altsetting)
+{
+	if (!auto_remap_endpoints)
+		return desired_altsetting;
+
+	struct raw_gadget_altsetting *desired_alt = &iface->altsettings[desired_altsetting];
+	if (desired_alt->interface.bNumEndpoints == 0) {
+		// Alt 0 (no endpoints) is usually the idle state; never remap it.
+		return desired_altsetting;
+	}
+
+	const struct libusb_interface_descriptor *alts =
+		device_config_desc[host_device_desc.current_config]
+			->interface[desired_interface].altsetting;
+
+	int best_alt = -1;
+	int best_packet = -1;
+
+	for (int i = 0; i < iface->num_altsettings; i++) {
+		struct raw_gadget_altsetting *alt = &iface->altsettings[i];
+		if (alt->interface.bNumEndpoints == 0)
+			continue;
+
+		bool fits = true;
+		int alt_packet = 0;
+
+		for (int k = 0; k < alt->interface.bNumEndpoints; k++) {
+			struct raw_gadget_endpoint *ep = &alt->endpoints[k];
+			if (usb_endpoint_type(&ep->endpoint) != USB_ENDPOINT_XFER_ISOC)
+				continue;
+
+			uint16_t udc_limit = ep->udc_maxpacket_limit;
+			if (!udc_limit)
+				continue;
+
+			uint16_t dev_maxp = alts[i].endpoint[k].wMaxPacketSize & 0x7ff;
+			if (dev_maxp > udc_limit) {
+				fits = false;
+				break;
+			}
+			if (dev_maxp > alt_packet)
+				alt_packet = dev_maxp;
+		}
+
+		if (fits && alt_packet >= best_packet) {
+			best_packet = alt_packet;
+			best_alt = i;
+		}
+	}
+
+	return best_alt;
+}
+
 void injection(struct usb_raw_transfer_io &io, Json::Value patterns, std::string replacement_hex, bool &data_modified) {
 	std::string data(io.data, io.inner.length);
 	std::string replacement = hexToAscii(replacement_hex);
@@ -71,12 +317,12 @@ void injection(struct usb_raw_control_event &event, struct usb_raw_transfer_io &
 	}
 }
 
-void injection(struct usb_raw_transfer_io &io, struct usb_endpoint_descriptor ep, std::string transfer_type) {
+void injection(struct usb_raw_transfer_io &io, __u8 device_ep_address, std::string transfer_type) {
 	// This is just a simple injection function for int and bulk transfer.
 	for (unsigned int i = 0; i < injection_config[transfer_type].size(); i++) {
 		Json::Value rule = injection_config[transfer_type][i];
 		if (rule["enable"].asBool() != true ||
-		    hexToDecimal(rule["ep_address"].asInt()) != ep.bEndpointAddress)
+		    hexToDecimal(rule["ep_address"].asInt()) != device_ep_address)
 			continue;
 
 		Json::Value patterns = rule["content_pattern"];
@@ -110,6 +356,7 @@ void *ep_loop_write(void *arg) {
 	std::string dir = thread_info.dir;
 	std::deque<usb_raw_transfer_io> *data_queue = thread_info.data_queue;
 	std::mutex *data_mutex = thread_info.data_mutex;
+	std::atomic<bool> *please_stop = thread_info.please_stop;
 
 	printf("Start writing thread for EP%02x, thread id(%d)\n",
 		ep.bEndpointAddress, gettid());
@@ -118,14 +365,16 @@ void *ep_loop_write(void *arg) {
 	// will thus interrupt a blocking ioctl call without other side-effects.
 	signal(SIGUSR1, noop_signal_handler);
 
-	while (!please_stop_eps) {
+	// Check both per-endpoint flag (interface change) and global flag (device reset)
+	while (!*please_stop && !please_stop_eps) {
 		assert(ep_num != -1);
-		if (data_queue->size() == 0) {
+
+		data_mutex->lock();
+		if (data_queue->empty()) {
+			data_mutex->unlock();
 			usleep(100);
 			continue;
 		}
-
-		data_mutex->lock();
 		struct usb_raw_transfer_io io = data_queue->front();
 		data_queue->pop_front();
 		data_mutex->unlock();
@@ -161,7 +410,8 @@ void *ep_loop_write(void *arg) {
 			int length = io.inner.length;
 			unsigned char *data = new unsigned char[length];
 			memcpy(data, io.data, length);
-			int rv = send_data(ep.bEndpointAddress, ep.bmAttributes, data, length, USB_REQUEST_TIMEOUT);
+			int rv = send_data(thread_info.device_bEndpointAddress, ep.bmAttributes,
+					   data, length, USB_REQUEST_TIMEOUT);
 			if (rv == LIBUSB_ERROR_NO_DEVICE) {
 				printf("EP%x(%s_%s): device likely reset, stopping thread\n",
 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
@@ -187,6 +437,7 @@ void *ep_loop_read(void *arg) {
 	std::string dir = thread_info.dir;
 	std::deque<usb_raw_transfer_io> *data_queue = thread_info.data_queue;
 	std::mutex *data_mutex = thread_info.data_mutex;
+	std::atomic<bool> *please_stop = thread_info.please_stop;
 
 	printf("Start reading thread for EP%02x, thread id(%d)\n",
 		ep.bEndpointAddress, gettid());
@@ -195,46 +446,106 @@ void *ep_loop_read(void *arg) {
 	// will thus interrupt a blocking ioctl call without other side-effects.
 	signal(SIGUSR1, noop_signal_handler);
 
-	while (!please_stop_eps) {
+	// Check both per-endpoint flag (interface change) and global flag (device reset)
+	while (!*please_stop && !please_stop_eps) {
 		assert(ep_num != -1);
 		struct usb_raw_transfer_io io;
 
 		if (ep.bEndpointAddress & USB_DIR_IN) {
-			unsigned char *data = NULL;
-			int nbytes = -1;
-
-			if (data_queue->size() >= 32) {
+			data_mutex->lock();
+			bool queue_full = data_queue->size() >= 32;
+			data_mutex->unlock();
+			if (queue_full) {
 				usleep(200);
 				continue;
 			}
 
-			int rv = receive_data(ep.bEndpointAddress, ep.bmAttributes, usb_endpoint_maxp(&ep),
-						&data, &nbytes, USB_REQUEST_TIMEOUT);
-			if (rv == LIBUSB_ERROR_NO_DEVICE) {
-				printf("EP%x(%s_%s): device likely reset, stopping thread\n",
-					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
-				break;
-			}
+			if ((ep.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_ISOC) {
+				struct iso_batch_result batch;
+				int rv = receive_iso_data_batched(thread_info.device_bEndpointAddress,
+								usb_endpoint_maxp(&ep),
+								&batch, iso_batch_size, USB_REQUEST_TIMEOUT);
+				if (rv == LIBUSB_ERROR_NO_DEVICE) {
+					printf("EP%x(%s_%s): device likely reset, stopping thread\n",
+						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+					break;
+				}
 
-			if (nbytes >= 0) {
-				memcpy(io.data, data, nbytes);
-				io.inner.ep = ep_num;
-				io.inner.flags = 0;
-				io.inner.length = nbytes;
+				if (rv != LIBUSB_SUCCESS || !batch.success) {
+					if (batch.buffer)
+						delete[] batch.buffer;
+					continue;
+				}
 
-				if (injection_enabled)
-					injection(io, ep, transfer_type);
+				int packets_enqueued = 0;
+				for (int i = 0; i < batch.num_packets; i++) {
+					if (batch.packets[i].status != LIBUSB_TRANSFER_COMPLETED) {
+						if (verbose_level > 1)
+							printf("EP%x(%s_%s): packet %d status %d, skipping\n",
+								ep.bEndpointAddress, transfer_type.c_str(),
+								dir.c_str(), i, batch.packets[i].status);
+						continue;
+					}
+					if (batch.packets[i].actual_length <= 0)
+						continue;
 
-				data_mutex->lock();
-				data_queue->push_back(io);
-				data_mutex->unlock();
+					memcpy(io.data, batch.packets[i].data, batch.packets[i].actual_length);
+					io.inner.ep = ep_num;
+					io.inner.flags = 0;
+					io.inner.length = batch.packets[i].actual_length;
+
+					if (injection_enabled)
+						injection(io, thread_info.device_bEndpointAddress, transfer_type);
+
+					data_mutex->lock();
+					data_queue->push_back(io);
+					data_mutex->unlock();
+					packets_enqueued++;
+				}
 				if (verbose_level)
-					printf("EP%x(%s_%s): enqueued %d bytes to queue\n", ep.bEndpointAddress,
-							transfer_type.c_str(), dir.c_str(), nbytes);
-			}
+					printf("EP%x(%s_%s): enqueued %d/%d packets (%d bytes total)\n",
+						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str(),
+						packets_enqueued, batch.num_packets, batch.total_length);
 
-			if (data)
-				delete[] data;
+				if (batch.buffer)
+					delete[] batch.buffer;
+			}
+			else {
+				// Non-isochronous: use original single-packet path
+				unsigned char *data = NULL;
+				int nbytes = -1;
+
+				int rv = receive_data(thread_info.device_bEndpointAddress, ep.bmAttributes,
+							usb_endpoint_maxp(&ep),
+							&data, &nbytes, USB_REQUEST_TIMEOUT);
+				if (rv == LIBUSB_ERROR_NO_DEVICE) {
+					printf("EP%x(%s_%s): device likely reset, stopping thread\n",
+						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+					if (data)
+						delete[] data;
+					break;
+				}
+
+				if (nbytes >= 0) {
+					memcpy(io.data, data, nbytes);
+					io.inner.ep = ep_num;
+					io.inner.flags = 0;
+					io.inner.length = nbytes;
+
+					if (injection_enabled)
+						injection(io, thread_info.device_bEndpointAddress, transfer_type);
+
+					data_mutex->lock();
+					data_queue->push_back(io);
+					data_mutex->unlock();
+					if (verbose_level)
+						printf("EP%x(%s_%s): enqueued %d bytes to queue\n", ep.bEndpointAddress,
+								transfer_type.c_str(), dir.c_str(), nbytes);
+				}
+
+				if (data)
+					delete[] data;
+			}
 		}
 		else {
 			io.inner.ep = ep_num;
@@ -261,7 +572,7 @@ void *ep_loop_read(void *arg) {
 			io.inner.length = rv;
 
 			if (injection_enabled)
-				injection(io, ep, transfer_type);
+				injection(io, thread_info.device_bEndpointAddress, transfer_type);
 
 			data_mutex->lock();
 			data_queue->push_back(io);
@@ -291,8 +602,10 @@ void process_eps(int fd, int config, int interface, int altsetting) {
 
 		ep->thread_info.fd = fd;
 		ep->thread_info.endpoint = ep->endpoint;
+		ep->thread_info.device_bEndpointAddress = ep->device_bEndpointAddress;
 		ep->thread_info.data_queue = new std::deque<usb_raw_transfer_io>;
 		ep->thread_info.data_mutex = new std::mutex;
+		ep->thread_info.please_stop = new std::atomic<bool>(false);
 
 		switch (usb_endpoint_type(&ep->endpoint)) {
 		case USB_ENDPOINT_XFER_ISOC:
@@ -336,38 +649,46 @@ void terminate_eps(int fd, int config, int interface, int altsetting) {
 	struct raw_gadget_altsetting *alt = &host_device_desc.configs[config]
 					.interfaces[interface].altsettings[altsetting];
 
-	please_stop_eps = true;
-
+	// Phase 1: Signal all threads to stop and interrupt blocking calls.
+	// Set per-endpoint stop flags (not global - only affects this interface's threads).
+	// Send SIGUSR1 to interrupt threads blocked on Raw Gadget ioctls.
+	// The threads have a no-op handler for this signal, so the ioctl gets
+	// interrupted with no other side-effects. Libusb transfer handling
+	// does not get interrupted directly and instead times out.
 	for (int i = 0; i < alt->interface.bNumEndpoints; i++) {
 		struct raw_gadget_endpoint *ep = &alt->endpoints[i];
+		if (ep->thread_info.please_stop)
+			*ep->thread_info.please_stop = true;
+		if (ep->thread_read)
+			pthread_kill(ep->thread_read, SIGUSR1);
+		if (ep->thread_write)
+			pthread_kill(ep->thread_write, SIGUSR1);
+	}
 
-		// Endpoint threads might be blocked either on a Raw Gadget
-		// ioctl or on a libusb transfer handling. To interrupt the
-		// former, we send the SIGUSR1 signal to the threads. The
-		// threads have a no-op handler set for this signal, so the
-		// ioctl gets interrupted with no other side-effects.
-		// The libusb transfer handling does get interrupted directly
-		// and instead times out.
-		pthread_kill(ep->thread_read, SIGUSR1);
-		pthread_kill(ep->thread_write, SIGUSR1);
-
-		if (ep->thread_read && pthread_join(ep->thread_read, NULL)) {
+	// Phase 2: Wait for all threads to exit.
+	for (int i = 0; i < alt->interface.bNumEndpoints; i++) {
+		struct raw_gadget_endpoint *ep = &alt->endpoints[i];
+		if (ep->thread_read && pthread_join(ep->thread_read, NULL))
 			fprintf(stderr, "Error join thread_read\n");
-		}
-		if (ep->thread_write && pthread_join(ep->thread_write, NULL)) {
+		if (ep->thread_write && pthread_join(ep->thread_write, NULL))
 			fprintf(stderr, "Error join thread_write\n");
-		}
 		ep->thread_read = 0;
 		ep->thread_write = 0;
+	}
 
+	// Phase 3: Clean up resources after all threads have exited.
+	for (int i = 0; i < alt->interface.bNumEndpoints; i++) {
+		struct raw_gadget_endpoint *ep = &alt->endpoints[i];
 		usb_raw_ep_disable(fd, ep->thread_info.ep_num);
 		ep->thread_info.ep_num = -1;
 
 		delete ep->thread_info.data_queue;
 		delete ep->thread_info.data_mutex;
+		delete ep->thread_info.please_stop;
+		ep->thread_info.data_queue = nullptr;
+		ep->thread_info.data_mutex = nullptr;
+		ep->thread_info.please_stop = nullptr;
 	}
-
-	please_stop_eps = false;
 }
 
 void ep0_loop(int fd) {
@@ -416,6 +737,7 @@ void ep0_loop(int fd) {
 					iface->current_altsetting = 0;
 				}
 				printf("Endpoint threads stopped\n");
+				please_stop_eps = false;
 				host_device_desc.current_config = 0;
 				set_configuration_done_once = false;
 			}
@@ -459,6 +781,9 @@ void ep0_loop(int fd) {
 						break;
 					}
 				}
+
+				maybe_override_descriptor(&event.ctrl, io);
+				clamp_uvc_probe_commit(&event.ctrl, io);
 
 				// Some UDCs require bMaxPacketSize0 to be at least 64.
 				// Ideally, the information about UDC limitations needs to be
@@ -570,9 +895,25 @@ void ep0_loop(int fd) {
 					continue;
 				}
 
-				struct raw_gadget_altsetting *alt = &iface->altsettings[desired_altsetting];
+				int effective_altsetting = find_best_compatible_altsetting(
+					iface, desired_interface, desired_altsetting);
 
-				if (desired_altsetting == iface->current_altsetting) {
+				if (effective_altsetting < 0) {
+					printf("[Warning] No compatible altsetting for interface %d, stalling\n",
+						iface->altsettings[desired_altsetting].interface.bInterfaceNumber);
+					usb_raw_ep0_stall(fd);
+					continue;
+				}
+
+				if (effective_altsetting != desired_altsetting) {
+					printf("[Warning] Altsetting %d exceeds UDC limit; using %d instead\n",
+						iface->altsettings[desired_altsetting].interface.bAlternateSetting,
+						iface->altsettings[effective_altsetting].interface.bAlternateSetting);
+				}
+
+				struct raw_gadget_altsetting *alt = &iface->altsettings[effective_altsetting];
+
+				if (effective_altsetting == iface->current_altsetting) {
 					printf("Interface/altsetting already set\n");
 					// But lets propagate the request to the device.
 					set_interface_alt_setting(alt->interface.bInterfaceNumber,
@@ -585,8 +926,8 @@ void ep0_loop(int fd) {
 					set_interface_alt_setting(alt->interface.bInterfaceNumber,
 						alt->interface.bAlternateSetting);
 					process_eps(fd, host_device_desc.current_config,
-						desired_interface, desired_altsetting);
-					iface->current_altsetting = desired_altsetting;
+						desired_interface, effective_altsetting);
+					iface->current_altsetting = effective_altsetting;
 					usleep(10000); // Give threads time to spawn.
 				}
 
@@ -655,6 +996,7 @@ void ep0_loop(int fd) {
 					if (verbose_level >= 2)
 						printData(io, 0x00, "control", "out");
 
+					clamp_uvc_probe_commit(&event.ctrl, io);
 					memcpy(control_data, io.data, event.ctrl.wLength);
 
 					result = control_request(&event.ctrl, &nbytes, &control_data, USB_REQUEST_TIMEOUT);

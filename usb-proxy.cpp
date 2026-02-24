@@ -1,3 +1,7 @@
+#include <atomic>
+#include <unordered_map>
+#include <vector>
+
 #include "host-raw-gadget.h"
 #include "device-libusb.h"
 #include "proxy.h"
@@ -5,7 +9,7 @@
 
 int verbose_level = 0;
 bool please_stop_ep0 = false;
-volatile bool please_stop_eps = false; // Use volatile to mark as atomic.
+std::atomic<bool> please_stop_eps(false);
 
 bool injection_enabled = false;
 std::string injection_file = "injection.json";
@@ -15,6 +19,8 @@ bool customized_config_enabled = false;
 std::string customized_config_file = "config.json";
 bool reset_device_before_proxy = true;
 bool bmaxpacketsize0_must_greater_than_64 = true;
+bool auto_remap_endpoints = false;
+int iso_batch_size = ISO_BATCH_SIZE_DEFAULT;
 
 void usage() {
 	printf("Usage:\n");
@@ -26,7 +32,10 @@ void usage() {
 	printf("\t--product_id: use specific product_id of USB device\n");
 	printf("\t--enable_injection: enable the injection feature\n");
 	printf("\t--injection_file: specify the file that contains injection rules\n");
-	printf("\t--enable_customized_config: enable the customized config feature\n\n");
+	printf("\t--enable_customized_config: enable the customized config feature\n");
+	printf("\t--auto_remap_endpoints: enable endpoint remapping when UDC can't use descriptors directly\n");
+	printf("\t--iso_batch_size N: number of isochronous packets per transfer (1-%d, default %d)\n\n",
+		ISO_BATCH_SIZE_MAX, ISO_BATCH_SIZE_DEFAULT);
 	printf("* If `device` not specified, `usb-proxy` will use `dummy_udc.0` as default device.\n");
 	printf("* If `driver` not specified, `usb-proxy` will use `dummy_udc` as default driver.\n");
 	printf("* If both `vendor_id` and `product_id` not specified, `usb-proxy` will connect\n");
@@ -54,6 +63,172 @@ void handle_signal(int signum) {
 		please_stop_eps = true;
 		break;
 	}
+}
+
+// Wrapper for UDC endpoint info, allowing future extension with additional state.
+struct EndpointCandidate {
+	struct usb_raw_ep_info info;
+};
+
+static bool candidate_supports_endpoint(const EndpointCandidate &candidate,
+					const struct usb_endpoint_descriptor &endpoint)
+{
+	bool dir_in = usb_endpoint_dir_in(&endpoint);
+	int type = usb_endpoint_type(&endpoint);
+
+	if (dir_in && !candidate.info.caps.dir_in)
+		return false;
+	if (!dir_in && !candidate.info.caps.dir_out)
+		return false;
+
+	switch (type) {
+	case USB_ENDPOINT_XFER_ISOC:
+		if (!candidate.info.caps.type_iso)
+			return false;
+		break;
+	case USB_ENDPOINT_XFER_BULK:
+		if (!candidate.info.caps.type_bulk)
+			return false;
+		break;
+	case USB_ENDPOINT_XFER_INT:
+		if (!candidate.info.caps.type_int)
+			return false;
+		break;
+	default:
+		return false;
+	}
+
+	uint16_t max_packet = usb_endpoint_maxp(&endpoint);
+	if (candidate.info.limits.maxpacket_limit &&
+	    max_packet > candidate.info.limits.maxpacket_limit)
+		return false;
+
+	return true;
+}
+
+static uint8_t compute_host_endpoint_address(const EndpointCandidate &candidate,
+					     uint8_t device_address,
+					     bool dir_in)
+{
+	if (candidate.info.addr == USB_RAW_EP_ADDR_ANY)
+		return device_address;
+
+	uint8_t host_address = static_cast<uint8_t>(candidate.info.addr);
+	if (dir_in)
+		host_address |= USB_DIR_IN;
+	else
+		host_address &= ~USB_DIR_IN;
+
+	return host_address;
+}
+
+static int find_candidate_index(const std::vector<EndpointCandidate> &candidates,
+				std::vector<bool> &candidate_used,
+				const struct usb_endpoint_descriptor &endpoint)
+{
+	for (size_t i = 0; i < candidates.size(); i++) {
+		if (candidate_used[i])
+			continue;
+		if (!candidate_supports_endpoint(candidates[i], endpoint))
+			continue;
+		return i;
+	}
+	return -1;
+}
+
+static int remap_config_endpoints(struct raw_gadget_config *config,
+				  const std::vector<EndpointCandidate> &candidates)
+{
+	std::vector<bool> candidate_used(candidates.size(), false);
+	std::unordered_map<uint8_t, size_t> device_to_candidate;
+
+	for (int i = 0; i < config->config.bNumInterfaces; i++) {
+		struct raw_gadget_interface *iface = &config->interfaces[i];
+		for (int j = 0; j < iface->num_altsettings; j++) {
+			struct raw_gadget_altsetting *alt = &iface->altsettings[j];
+			uint8_t iface_num = alt->interface.bInterfaceNumber;
+			uint8_t alt_setting = alt->interface.bAlternateSetting;
+			for (int k = 0; k < alt->interface.bNumEndpoints; k++) {
+				struct raw_gadget_endpoint *ep = &alt->endpoints[k];
+				uint8_t device_address = ep->device_bEndpointAddress;
+				auto existing = device_to_candidate.find(device_address);
+
+				size_t candidate_index;
+				if (existing != device_to_candidate.end()) {
+					candidate_index = existing->second;
+				}
+				else {
+					int idx = find_candidate_index(candidates,
+								       candidate_used,
+								       ep->endpoint);
+					if (idx < 0) {
+						printf("Failed to remap endpoint 0x%02x "
+						       "(interface %u, alt %u)\n",
+						       device_address, iface_num, alt_setting);
+						return -1;
+					}
+					candidate_index = (size_t)idx;
+					device_to_candidate[device_address] = candidate_index;
+					candidate_used[candidate_index] = true;
+				}
+
+				bool dir_in = usb_endpoint_dir_in(&ep->endpoint);
+				uint8_t host_address = compute_host_endpoint_address(
+					candidates[candidate_index], device_address, dir_in);
+
+				if (host_address != ep->endpoint.bEndpointAddress) {
+					printf("Remapping endpoint 0x%02x -> 0x%02x "
+					       "(interface %u, alt %u)\n",
+						device_address, host_address, iface_num, alt_setting);
+				}
+
+				ep->endpoint.bEndpointAddress = host_address;
+				ep->udc_maxpacket_limit = candidates[candidate_index].info.limits.maxpacket_limit;
+
+				// Clamp isochronous max packet size to UDC limit; UDC can't do high bandwidth.
+				if (usb_endpoint_type(&ep->endpoint) == USB_ENDPOINT_XFER_ISOC &&
+				    ep->udc_maxpacket_limit) {
+					uint16_t maxp = usb_endpoint_maxp(&ep->endpoint);
+					uint16_t base = maxp & 0x7ff;
+					if (base > ep->udc_maxpacket_limit ||
+					    (ep->endpoint.wMaxPacketSize & 0x1800)) {
+						ep->endpoint.wMaxPacketSize = ep->udc_maxpacket_limit;
+					}
+				}
+			}
+		}
+	}
+
+	return 0;
+}
+
+static int remap_host_endpoints_if_needed(int fd)
+{
+	if (!auto_remap_endpoints)
+		return 0;
+
+	struct usb_raw_eps_info eps_info;
+	memset(&eps_info, 0, sizeof(eps_info));
+
+	int num = usb_raw_eps_info(fd, &eps_info);
+	if (num <= 0) {
+		printf("Failed to fetch endpoint info for remapping\n");
+		return -1;
+	}
+
+	std::vector<EndpointCandidate> candidates;
+	for (int i = 0; i < num; i++) {
+		EndpointCandidate candidate;
+		candidate.info = eps_info.eps[i];
+		candidates.push_back(candidate);
+	}
+
+	for (int i = 0; i < host_device_desc.device.bNumConfigurations; i++) {
+		if (remap_config_endpoints(&host_device_desc.configs[i], candidates) < 0)
+			return -1;
+	}
+
+	return 0;
 }
 
 int setup_host_usb_desc() {
@@ -135,6 +310,8 @@ int setup_host_usb_desc() {
 						.bSynchAddress = 	temp_device_altsetting.endpoint[l].bSynchAddress,
 					};
 					temp_endpoints[l].endpoint = temp_endpoint;
+					temp_endpoints[l].device_bEndpointAddress = temp_endpoint.bEndpointAddress;
+					temp_endpoints[l].udc_maxpacket_limit = 0;
 					temp_endpoints[l].thread_read = 0;
 					temp_endpoints[l].thread_write = 0;
 					memset((void *)&temp_endpoints[l].thread_info, 0,
@@ -181,6 +358,8 @@ int main(int argc, char **argv)
 		{"enable_injection", no_argument, &lopt, 7},
 		{"injection_file", required_argument, &lopt, 8},
 		{"enable_customized_config", no_argument, &lopt, 9},
+		{"auto_remap_endpoints", no_argument, &lopt, 10},
+		{"iso_batch_size", required_argument, &lopt, 11},
 		{0, 0, 0, 0}
 	};
 	while ((opt = getopt_long(argc, argv, optstring, long_options, &loidx)) != -1) {
@@ -219,6 +398,18 @@ int main(int argc, char **argv)
 			break;
 		case 9:
 			customized_config_enabled = true;
+			break;
+		case 10:
+			auto_remap_endpoints = true;
+			printf("Automatic endpoint remapping enabled\n");
+			break;
+		case 11:
+			iso_batch_size = std::stoi(optarg);
+			if (iso_batch_size < 1)
+				iso_batch_size = 1;
+			if (iso_batch_size > ISO_BATCH_SIZE_MAX)
+				iso_batch_size = ISO_BATCH_SIZE_MAX;
+			printf("Isochronous batch size set to %d\n", iso_batch_size);
 			break;
 
 		default:
@@ -293,6 +484,11 @@ int main(int argc, char **argv)
 	int fd = usb_raw_open();
 	usb_raw_init(fd, USB_SPEED_HIGH, driver, device);
 	usb_raw_run(fd);
+
+	if (remap_host_endpoints_if_needed(fd) < 0) {
+		close(fd);
+		return 1;
+	}
 
 	ep0_loop(fd);
 

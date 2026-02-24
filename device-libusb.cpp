@@ -23,7 +23,7 @@ void *hotplug_monitor(void *arg __attribute__((unused))) {
 	printf("Start hotplug_monitor thread, thread id(%d)\n", gettid());
 	while(true) {
 		usleep(100 * 1000);
-		libusb_handle_events_completed(NULL, NULL);
+		libusb_handle_events_completed(context, NULL);
 	}
 }
 
@@ -304,6 +304,79 @@ void iso_transfer_callback(struct libusb_transfer *transfer) {
 	*iso_completed = 1;
 }
 
+int receive_iso_data_batched(uint8_t endpoint, uint16_t maxPacketSize,
+			struct iso_batch_result *result, int batch_size, int timeout) {
+	if (batch_size < 1)
+		batch_size = 1;
+	if (batch_size > ISO_BATCH_SIZE_MAX)
+		batch_size = ISO_BATCH_SIZE_MAX;
+
+	memset(result, 0, sizeof(*result));
+	result->buffer = new uint8_t[maxPacketSize * batch_size];
+
+	struct libusb_transfer *transfer = libusb_alloc_transfer(batch_size);
+	if (!transfer) {
+		fprintf(stderr, "Failed to allocate libusb_transfer for ISO batch.\n");
+		delete[] result->buffer;
+		result->buffer = nullptr;
+		return LIBUSB_ERROR_OTHER;
+	}
+
+	int iso_completed = 0;
+	libusb_fill_iso_transfer(transfer, dev_handle, endpoint, result->buffer,
+				maxPacketSize * batch_size, batch_size,
+				iso_transfer_callback, &iso_completed, timeout);
+	libusb_set_iso_packet_lengths(transfer, maxPacketSize);
+
+	int rv = libusb_submit_transfer(transfer);
+	if (rv != LIBUSB_SUCCESS) {
+		if (verbose_level)
+			fprintf(stderr, "ISO batch submit failed on EP%02x: %s\n",
+				endpoint, libusb_strerror((libusb_error)rv));
+		libusb_free_transfer(transfer);
+		delete[] result->buffer;
+		result->buffer = nullptr;
+		return rv;
+	}
+
+	while (!iso_completed)
+		libusb_handle_events_completed(context, &iso_completed);
+
+	if (transfer->status != LIBUSB_TRANSFER_COMPLETED &&
+	    transfer->status != LIBUSB_TRANSFER_TIMED_OUT) {
+		if (verbose_level)
+			fprintf(stderr, "ISO batch transfer failed on EP%02x: status %d\n",
+				endpoint, transfer->status);
+		if (transfer->status == LIBUSB_TRANSFER_STALL)
+			libusb_clear_halt(dev_handle, endpoint);
+		libusb_free_transfer(transfer);
+		delete[] result->buffer;
+		result->buffer = nullptr;
+		return LIBUSB_ERROR_IO;
+	}
+
+	result->num_packets = batch_size;
+	uint8_t *packet_ptr = result->buffer;
+	for (int i = 0; i < batch_size; i++) {
+		result->packets[i].data = packet_ptr;
+		result->packets[i].actual_length = transfer->iso_packet_desc[i].actual_length;
+		result->packets[i].status = transfer->iso_packet_desc[i].status;
+		result->total_length += result->packets[i].actual_length;
+		packet_ptr += maxPacketSize;
+
+		if (result->packets[i].status == LIBUSB_TRANSFER_COMPLETED &&
+		    result->packets[i].actual_length > 0)
+			result->success = true;
+	}
+
+	if (verbose_level > 2)
+		printf("ISO batch received: %d packets, %d total bytes\n",
+			batch_size, result->total_length);
+
+	libusb_free_transfer(transfer);
+	return LIBUSB_SUCCESS;
+}
+
 int receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 			uint8_t **dataptr, int *length, int timeout) {
 	int result = LIBUSB_SUCCESS;
@@ -337,7 +410,7 @@ int receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 			break;
 		}
 		while (!iso_completed)
-			libusb_handle_events_completed(NULL, &iso_completed);
+			libusb_handle_events_completed(context, &iso_completed);
 		*length = 0;
 		for (int i = 0; i < iso_packets; i++)
 			*length += transfer->iso_packet_desc[i].actual_length;

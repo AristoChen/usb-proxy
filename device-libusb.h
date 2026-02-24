@@ -6,6 +6,23 @@
 
 #define MAX_ATTEMPTS 5
 
+#define ISO_BATCH_SIZE_DEFAULT 8
+#define ISO_BATCH_SIZE_MAX 32
+
+struct iso_packet_result {
+	uint8_t *data;
+	int actual_length;
+	int status; // libusb_transfer_status
+};
+
+struct iso_batch_result {
+	uint8_t *buffer;
+	int num_packets;
+	struct iso_packet_result packets[ISO_BATCH_SIZE_MAX];
+	int total_length;
+	bool success;
+};
+
 extern libusb_device			**devs;
 extern libusb_device_handle		*dev_handle;
 extern libusb_context			*context;
@@ -28,3 +45,5 @@ int send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,
 			int length, int timeout);
 int receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 			uint8_t **dataptr, int *length, int timeout);
+int receive_iso_data_batched(uint8_t endpoint, uint16_t maxPacketSize,
+			struct iso_batch_result *result, int batch_size, int timeout);
