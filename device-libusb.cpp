@@ -68,20 +68,10 @@ int connect_device(int vendor_id, int product_id) {
 	}
 	libusb_set_debug(context, 3);
 
-	libusb_device **list = NULL;
 	libusb_device *found = NULL;
 
-	int cnt = libusb_get_device_list(context, &list);
-	if (cnt < 0) {
-		if (verbose_level) {
-			fprintf(stderr, "Error retrieving device list: %s\n",
-					libusb_strerror((libusb_error)cnt));
-		}
-		return cnt;
-	}
-
 	while (found == NULL) {
-		cnt = libusb_get_device_list(context, &devs);
+		int cnt = libusb_get_device_list(context, &devs);
 		if (cnt < 0) {
 			fprintf(stderr, "Get Device Error: %s\n",
 					libusb_strerror((libusb_error)cnt));
@@ -445,8 +435,6 @@ int receive_iso_data_batched(uint8_t endpoint, uint16_t maxPacketSize,
 int receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 			uint8_t **dataptr, int *length, int timeout) {
 	int result = LIBUSB_SUCCESS;
-	struct libusb_transfer *transfer;
-	int iso_completed, iso_packets;
 
 	int attempt = 0;
 	switch (attributes & USB_ENDPOINT_XFERTYPE_MASK) {
@@ -454,34 +442,8 @@ int receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 		fprintf(stderr, "Can't read on a control endpoint.\n");
 		break;
 	case USB_ENDPOINT_XFER_ISOC:
-		*dataptr = new uint8_t[maxPacketSize];
-		// We could retrieve multiple packets at a time, but then we
-		// would need to split the received data submit each packet
-		// separately via Raw Gadget. So retrieve only one packet for
-		// simplicity.
-		iso_packets = 1;
-		transfer = libusb_alloc_transfer(iso_packets);
-		if (!transfer) {
-			fprintf(stderr, "Failed to allocate libusb_transfer.\n");
-			result = LIBUSB_ERROR_OTHER;
-		}
-		iso_completed = 0;
-		libusb_fill_iso_transfer(transfer, dev_handle, endpoint, *dataptr, maxPacketSize,
-					iso_packets, iso_transfer_callback, &iso_completed, timeout);
-		libusb_set_iso_packet_lengths(transfer, maxPacketSize / iso_packets);
-		result = libusb_submit_transfer(transfer);
-		if (result != LIBUSB_SUCCESS) {
-			libusb_free_transfer(transfer);
-			break;
-		}
-		while (!iso_completed)
-			libusb_handle_events_completed(context, &iso_completed);
-		*length = 0;
-		for (int i = 0; i < iso_packets; i++)
-			*length += transfer->iso_packet_desc[i].actual_length;
-		if (result == LIBUSB_SUCCESS && verbose_level > 2)
-			printf("Received iso data(%d) bytes\n", *length);
-		libusb_free_transfer(transfer);
+		// ISO IN is handled by receive_iso_data_batched() directly.
+		fprintf(stderr, "receive_data() should not be called for ISO endpoints.\n");
 		break;
 	case USB_ENDPOINT_XFER_BULK:
 		*dataptr = new uint8_t[maxPacketSize * 8];
