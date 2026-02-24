@@ -1,3 +1,5 @@
+#include <atomic>
+
 #include "device-libusb.h"
 
 libusb_device 			**devs;
@@ -20,10 +22,14 @@ int hotplug_callback(struct libusb_context *ctx __attribute__((unused)),
 }
 
 void *hotplug_monitor(void *arg __attribute__((unused))) {
-	printf("Start hotplug_monitor thread, thread id(%d)\n", gettid());
+	printf("Start hotplug_monitor/event thread, thread id(%d)\n", gettid());
 	while(true) {
-		usleep(100 * 1000);
-		libusb_handle_events_completed(context, NULL);
+		// This is the SOLE thread that calls libusb_handle_events.
+		// All other threads (ISO IN, ISO OUT) submit async transfers
+		// and spin-wait on their completion flags.  This avoids event
+		// lock contention that would otherwise starve ISO OUT sends.
+		struct timeval tv = {1, 0};
+		libusb_handle_events_timeout(context, &tv);
 	}
 }
 
@@ -104,20 +110,22 @@ int connect_device(int vendor_id, int product_id) {
 			}
 		}
 
-		if (verbose_level && vendor_id != -1 && product_id != -1)
-			printf("Target device not found\n");
-		libusb_free_device_list(devs, 1);
-		sleep(1);
+		if (!found) {
+			if (verbose_level && vendor_id != -1 && product_id != -1)
+				printf("Target device not found\n");
+			libusb_free_device_list(devs, 1);
+			sleep(1);
+		}
 	}
 
 	result = libusb_open(found, &dev_handle);
+	libusb_free_device_list(devs, 1);
 	if (result != LIBUSB_SUCCESS) {
 		if (verbose_level) {
 			fprintf(stderr, "Error opening device handle: %s\n",
 					libusb_strerror((libusb_error)result));
 		}
 		dev_handle = NULL;
-		libusb_free_device_list(list, 1);
 		return result;
 	}
 
@@ -244,6 +252,8 @@ int control_request(const usb_ctrlrequest *setup_packet, int *nbytes,
 	return 0;
 }
 
+int send_iso_data(uint8_t endpoint, uint8_t *dataptr, int length, int timeout);
+
 int send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,
 			int length, int timeout) {
 	int transferred;
@@ -255,10 +265,6 @@ int send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,
 	switch (attributes & USB_ENDPOINT_XFERTYPE_MASK) {
 	case USB_ENDPOINT_XFER_CONTROL:
 		fprintf(stderr, "Can't send on a control endpoint.\n");
-		break;
-	case USB_ENDPOINT_XFER_ISOC:
-		if (verbose_level)
-			fprintf(stderr, "Isochronous(write) endpoint EP%02x unhandled.\n", endpoint);
 		break;
 	case USB_ENDPOINT_XFER_BULK:
 		do {
@@ -304,6 +310,63 @@ void iso_transfer_callback(struct libusb_transfer *transfer) {
 	*iso_completed = 1;
 }
 
+// Bounded async ISO OUT: submit and return immediately.
+// The dedicated event thread (hotplug_monitor) processes completions.
+// We limit in-flight transfers to avoid flooding the kernel.
+#define ISO_OUT_MAX_IN_FLIGHT 8
+static std::atomic<int> iso_out_in_flight(0);
+
+static void iso_out_callback(struct libusb_transfer *transfer) {
+	iso_out_in_flight--;
+	if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
+		static int iso_out_err_count = 0;
+		iso_out_err_count++;
+		if (iso_out_err_count <= 10 || iso_out_err_count % 100 == 0)
+			fprintf(stderr, "ISO OUT EP%02x failed: status=%d (total errors: %d)\n",
+				transfer->endpoint, transfer->status, iso_out_err_count);
+	}
+	// Free the buffer passed via user_data.
+	delete[] (unsigned char *)transfer->user_data;
+	libusb_free_transfer(transfer);
+}
+
+int send_iso_data(uint8_t endpoint, uint8_t *dataptr, int length, int timeout) {
+	// If at capacity, wait briefly for a slot.
+	int waited_us = 0;
+	while (iso_out_in_flight >= ISO_OUT_MAX_IN_FLIGHT && waited_us < 2000) {
+		usleep(50);
+		waited_us += 50;
+	}
+	if (iso_out_in_flight >= ISO_OUT_MAX_IN_FLIGHT) {
+		// Drop this packet -- ISO is inherently lossy.
+		// Free the buffer since the callback won't run.
+		delete[] dataptr;
+		return LIBUSB_SUCCESS;
+	}
+
+	struct libusb_transfer *transfer = libusb_alloc_transfer(1);
+	if (!transfer) {
+		fprintf(stderr, "Failed to allocate libusb_transfer for ISO OUT.\n");
+		return LIBUSB_ERROR_OTHER;
+	}
+
+	// The callback frees both the transfer and the buffer (via user_data).
+	libusb_fill_iso_transfer(transfer, dev_handle, endpoint, dataptr, length,
+				1, iso_out_callback, dataptr, timeout);
+	libusb_set_iso_packet_lengths(transfer, length);
+
+	int rv = libusb_submit_transfer(transfer);
+	if (rv != LIBUSB_SUCCESS) {
+		fprintf(stderr, "ISO OUT submit failed on EP%02x: %s (len=%d)\n",
+			endpoint, libusb_strerror((libusb_error)rv), length);
+		libusb_free_transfer(transfer);
+		return rv;
+	}
+
+	iso_out_in_flight++;
+	return LIBUSB_SUCCESS;
+}
+
 int receive_iso_data_batched(uint8_t endpoint, uint16_t maxPacketSize,
 			struct iso_batch_result *result, int batch_size, int timeout) {
 	if (batch_size < 1)
@@ -322,10 +385,10 @@ int receive_iso_data_batched(uint8_t endpoint, uint16_t maxPacketSize,
 		return LIBUSB_ERROR_OTHER;
 	}
 
-	int iso_completed = 0;
+	volatile int iso_completed = 0;
 	libusb_fill_iso_transfer(transfer, dev_handle, endpoint, result->buffer,
 				maxPacketSize * batch_size, batch_size,
-				iso_transfer_callback, &iso_completed, timeout);
+				iso_transfer_callback, (void *)&iso_completed, timeout);
 	libusb_set_iso_packet_lengths(transfer, maxPacketSize);
 
 	int rv = libusb_submit_transfer(transfer);
@@ -339,8 +402,10 @@ int receive_iso_data_batched(uint8_t endpoint, uint16_t maxPacketSize,
 		return rv;
 	}
 
+	// Spin-wait for completion; the dedicated event thread
+	// (hotplug_monitor) will call iso_transfer_callback.
 	while (!iso_completed)
-		libusb_handle_events_completed(context, &iso_completed);
+		usleep(50);
 
 	if (transfer->status != LIBUSB_TRANSFER_COMPLETED &&
 	    transfer->status != LIBUSB_TRANSFER_TIMED_OUT) {

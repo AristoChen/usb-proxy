@@ -43,6 +43,7 @@ int control_request(const usb_ctrlrequest *setup_packet, int *nbytes,
 			unsigned char **dataptr, int timeout);
 int send_data(uint8_t endpoint, uint8_t attributes, uint8_t *dataptr,
 			int length, int timeout);
+int send_iso_data(uint8_t endpoint, uint8_t *dataptr, int length, int timeout);
 int receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 			uint8_t **dataptr, int *length, int timeout);
 int receive_iso_data_batched(uint8_t endpoint, uint16_t maxPacketSize,

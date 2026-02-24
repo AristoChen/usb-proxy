@@ -394,9 +394,9 @@ void *ep_loop_write(void *arg) {
 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
 				break;
 			}
-			if (rv < 0 && (errno == EXDEV || errno == ENODATA)) {
-				printf("EP%x(%s_%s): missed isochronous timing, ignoring transfer\n",
-					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+			if (rv < 0 && (errno == EXDEV || errno == ENODATA || errno == EOVERFLOW)) {
+				printf("EP%x(%s_%s): isochronous timing error on write (errno=%d), ignoring transfer\n",
+					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str(), errno);
 				continue;
 			}
 			if (rv < 0) {
@@ -410,16 +410,32 @@ void *ep_loop_write(void *arg) {
 			int length = io.inner.length;
 			unsigned char *data = new unsigned char[length];
 			memcpy(data, io.data, length);
-			int rv = send_data(thread_info.device_bEndpointAddress, ep.bmAttributes,
-					   data, length, USB_REQUEST_TIMEOUT);
-			if (rv == LIBUSB_ERROR_NO_DEVICE) {
-				printf("EP%x(%s_%s): device likely reset, stopping thread\n",
-					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
-				break;
-			}
 
-			if (data)
+			if ((ep.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_ISOC) {
+				// Mirror the ISO IN read path: call the dedicated ISO function
+				// directly rather than going through the send_data() dispatcher.
+				// On success the async callback owns and frees the buffer.
+				int rv = send_iso_data(thread_info.device_bEndpointAddress,
+						       data, length, USB_REQUEST_TIMEOUT);
+				if (rv == LIBUSB_ERROR_NO_DEVICE) {
+					delete[] data;
+					printf("EP%x(%s_%s): device likely reset, stopping thread\n",
+						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+					break;
+				}
+				if (rv != LIBUSB_SUCCESS)
+					delete[] data;
+			} else {
+				int rv = send_data(thread_info.device_bEndpointAddress, ep.bmAttributes,
+						   data, length, USB_REQUEST_TIMEOUT);
+				if (rv == LIBUSB_ERROR_NO_DEVICE) {
+					delete[] data;
+					printf("EP%x(%s_%s): device likely reset, stopping thread\n",
+						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+					break;
+				}
 				delete[] data;
+			}
 		}
 	}
 
@@ -550,7 +566,14 @@ void *ep_loop_read(void *arg) {
 		else {
 			io.inner.ep = ep_num;
 			io.inner.flags = 0;
-			io.inner.length = sizeof(io.data);
+			// For ISO OUT, limit the buffer to one packet (wMaxPacketSize).
+			// Passing a larger buffer (e.g. 4096) causes musb-hdrc to report
+			// req->actual = req->length instead of the real frame size, which
+			// then triggers EMSGSIZE (-90) when forwarding to the physical device.
+			if ((ep.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_ISOC)
+				io.inner.length = usb_endpoint_maxp(&ep);
+			else
+				io.inner.length = sizeof(io.data);
 
 			int rv = usb_raw_ep_read(fd, (struct usb_raw_ep_io *)&io);
 			if (rv < 0 && errno == ESHUTDOWN) {
@@ -562,6 +585,12 @@ void *ep_loop_read(void *arg) {
 				printf("EP%x(%s_%s): interface likely changing, stopping thread\n",
 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
 				break;
+			}
+			if (rv < 0 && (errno == EXDEV || errno == ENODATA || errno == EOVERFLOW)) {
+				if (verbose_level)
+					printf("EP%x(%s_%s): isochronous timing error on read (errno=%d), continuing\n",
+						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str(), errno);
+				continue;
 			}
 			if (rv < 0) {
 				perror("usb_raw_ep_read()");
