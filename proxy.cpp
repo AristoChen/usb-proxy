@@ -41,6 +41,32 @@ static uint16_t find_udc_maxpacket_for_interface(uint8_t interface_number)
 	return max_limit;
 }
 
+// Translate a gadget-side endpoint address back to the physical device's
+// endpoint address. Needed for endpoint-directed class requests (e.g.,
+// USB Audio SET_CUR for sampling frequency) when endpoint remapping is active.
+static uint16_t remap_endpoint_for_device(uint16_t gadget_ep_addr)
+{
+	if (!auto_remap_endpoints)
+		return gadget_ep_addr;
+
+	struct raw_gadget_config *config =
+		&host_device_desc.configs[host_device_desc.current_config];
+
+	for (int i = 0; i < config->config.bNumInterfaces; i++) {
+		struct raw_gadget_interface *iface = &config->interfaces[i];
+		for (int j = 0; j < iface->num_altsettings; j++) {
+			struct raw_gadget_altsetting *alt = &iface->altsettings[j];
+			for (int k = 0; k < alt->interface.bNumEndpoints; k++) {
+				struct raw_gadget_endpoint *ep = &alt->endpoints[k];
+				if (ep->endpoint.bEndpointAddress == (uint8_t)gadget_ep_addr)
+					return ep->device_bEndpointAddress;
+			}
+		}
+	}
+
+	return gadget_ep_addr;
+}
+
 static void clamp_uvc_probe_commit(const usb_ctrlrequest *ctrl,
 				   struct usb_raw_transfer_io &io)
 {
@@ -148,6 +174,9 @@ static void rewrite_descriptor_addresses(uint8_t descriptor_type, uint8_t descri
 					data[offset + 4] = maxp & 0xff;
 					data[offset + 5] = (maxp >> 8) & 0xff;
 				}
+				// Also rewrite bInterval (offset 6 in endpoint descriptor).
+				if (offset + 7 <= length)
+					data[offset + 6] = ep->endpoint.bInterval;
 				current_endpoint++;
 			}
 		}
@@ -394,9 +423,9 @@ void *ep_loop_write(void *arg) {
 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
 				break;
 			}
-			if (rv < 0 && (errno == EXDEV || errno == ENODATA)) {
-				printf("EP%x(%s_%s): missed isochronous timing, ignoring transfer\n",
-					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+			if (rv < 0 && (errno == EXDEV || errno == ENODATA || errno == EOVERFLOW)) {
+				printf("EP%x(%s_%s): isochronous timing error on write (errno=%d), ignoring transfer\n",
+					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str(), errno);
 				continue;
 			}
 			if (rv < 0) {
@@ -410,16 +439,32 @@ void *ep_loop_write(void *arg) {
 			int length = io.inner.length;
 			unsigned char *data = new unsigned char[length];
 			memcpy(data, io.data, length);
-			int rv = send_data(thread_info.device_bEndpointAddress, ep.bmAttributes,
-					   data, length, USB_REQUEST_TIMEOUT);
-			if (rv == LIBUSB_ERROR_NO_DEVICE) {
-				printf("EP%x(%s_%s): device likely reset, stopping thread\n",
-					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
-				break;
-			}
 
-			if (data)
+			if ((ep.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_ISOC) {
+				// Mirror the ISO IN read path: call the dedicated ISO function
+				// directly rather than going through the send_data() dispatcher.
+				// On success the async callback owns and frees the buffer.
+				int rv = send_iso_data(thread_info.device_bEndpointAddress,
+						       data, length, USB_REQUEST_TIMEOUT);
+				if (rv == LIBUSB_ERROR_NO_DEVICE) {
+					delete[] data;
+					printf("EP%x(%s_%s): device likely reset, stopping thread\n",
+						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+					break;
+				}
+				if (rv != LIBUSB_SUCCESS)
+					delete[] data;
+			} else {
+				int rv = send_data(thread_info.device_bEndpointAddress, ep.bmAttributes,
+						   data, length, USB_REQUEST_TIMEOUT);
+				if (rv == LIBUSB_ERROR_NO_DEVICE) {
+					delete[] data;
+					printf("EP%x(%s_%s): device likely reset, stopping thread\n",
+						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+					break;
+				}
 				delete[] data;
+			}
 		}
 	}
 
@@ -550,7 +595,14 @@ void *ep_loop_read(void *arg) {
 		else {
 			io.inner.ep = ep_num;
 			io.inner.flags = 0;
-			io.inner.length = sizeof(io.data);
+			// For ISO OUT, limit the buffer to one packet (wMaxPacketSize).
+			// Passing a larger buffer (e.g. 4096) causes musb-hdrc to report
+			// req->actual = req->length instead of the real frame size, which
+			// then triggers EMSGSIZE (-90) when forwarding to the physical device.
+			if ((ep.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_ISOC)
+				io.inner.length = usb_endpoint_maxp(&ep);
+			else
+				io.inner.length = sizeof(io.data);
 
 			int rv = usb_raw_ep_read(fd, (struct usb_raw_ep_io *)&io);
 			if (rv < 0 && errno == ESHUTDOWN) {
@@ -562,6 +614,12 @@ void *ep_loop_read(void *arg) {
 				printf("EP%x(%s_%s): interface likely changing, stopping thread\n",
 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
 				break;
+			}
+			if (rv < 0 && (errno == EXDEV || errno == ENODATA || errno == EOVERFLOW)) {
+				if (verbose_level)
+					printf("EP%x(%s_%s): isochronous timing error on read (errno=%d), continuing\n",
+						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str(), errno);
+				continue;
 			}
 			if (rv < 0) {
 				perror("usb_raw_ep_read()");
@@ -756,6 +814,17 @@ void ep0_loop(int fd) {
 		int nbytes = 0;
 		int result = 0;
 		unsigned char *control_data = new unsigned char[event.ctrl.wLength];
+
+		// For endpoint-directed class requests, translate the gadget-side
+		// endpoint address in wIndex to the physical device's address.
+		if ((event.ctrl.bRequestType & USB_RECIP_MASK) == USB_RECIP_ENDPOINT) {
+			uint16_t device_ep = remap_endpoint_for_device(event.ctrl.wIndex & 0xff);
+			if (device_ep != (event.ctrl.wIndex & 0xff)) {
+				printf("ep0: remapping wIndex endpoint 0x%02x -> 0x%02x\n",
+					event.ctrl.wIndex & 0xff, device_ep);
+				event.ctrl.wIndex = (event.ctrl.wIndex & 0xff00) | device_ep;
+			}
+		}
 
 		int rv = -1;
 		if (event.ctrl.bRequestType & USB_DIR_IN) {
