@@ -23,6 +23,85 @@ bool auto_remap_endpoints = false;
 int iso_batch_size = ISO_BATCH_SIZE_DEFAULT;
 enum usb_device_speed device_speed = USB_SPEED_HIGH;
 
+// Print the transform summary for a single injection rule.
+// Returns true if the rule references a Lua script_file.
+static bool print_rule_transforms(const Json::Value &rule)
+{
+	bool has_pattern = rule["content_pattern"].size() > 0 &&
+			   !rule.get("replacement", "").asString().empty();
+	bool has_ops     = rule.isMember("operations") &&
+			   rule["operations"].size() > 0;
+	bool has_script  = rule.isMember("script_file") &&
+			   !rule["script_file"].asString().empty();
+
+	if (has_pattern) printf("  pattern+replace");
+	if (has_ops)     printf("  %u operation(s)", rule["operations"].size());
+	if (has_script)  printf("  script: %s", rule["script_file"].asString().c_str());
+	if (!has_pattern && !has_ops && !has_script) printf("  (no transform configured)");
+
+	return has_script;
+}
+
+static void print_injection_summary()
+{
+	const std::vector<std::string> ep_types   = {"int", "bulk", "isoc"};
+	const std::vector<std::string> ctrl_types = {"modify", "ignore", "stall"};
+
+	int active = 0;
+	for (const auto &type : ep_types)
+		for (unsigned int i = 0; i < injection_config[type].size(); i++)
+			if (injection_config[type][i]["enable"].asBool()) active++;
+	for (const auto &sub : ctrl_types)
+		for (unsigned int i = 0; i < injection_config["control"][sub].size(); i++)
+			if (injection_config["control"][sub][i]["enable"].asBool()) active++;
+
+	if (active == 0) {
+		printf("Injection rules: none enabled\n");
+		return;
+	}
+
+	printf("Injection rules: %d active\n", active);
+
+	bool any_script = false;
+
+	for (const auto &type : ep_types) {
+		for (unsigned int i = 0; i < injection_config[type].size(); i++) {
+			const Json::Value &rule = injection_config[type][i];
+			if (!rule["enable"].asBool()) continue;
+
+			int ep = hexToDecimal(rule["ep_address"].asInt());
+			printf("  [%-4s]  EP 0x%02x", type.c_str(), ep);
+			any_script |= print_rule_transforms(rule);
+			printf("\n");
+		}
+	}
+
+	for (const auto &sub : ctrl_types) {
+		for (unsigned int i = 0; i < injection_config["control"][sub].size(); i++) {
+			const Json::Value &rule = injection_config["control"][sub][i];
+			if (!rule["enable"].asBool()) continue;
+
+			printf("  [control/%-6s]  bRequestType=0x%02x bRequest=0x%02x",
+			       sub.c_str(),
+			       rule["bRequestType"].asInt(),
+			       rule["bRequest"].asInt());
+
+			if (sub == "modify")
+				any_script |= print_rule_transforms(rule);
+			printf("\n");
+		}
+	}
+
+#ifndef HAVE_LUA
+	if (any_script)
+		fprintf(stderr, "Warning: one or more rules use 'script_file' but usb-proxy was built "
+			"without Lua support — scripts will be ignored.\n"
+			"  Install a Lua dev package and rebuild: make clean && make\n");
+#else
+	(void)any_script;
+#endif
+}
+
 void usage() {
 	printf("Usage:\n");
 	printf("\t-h/--help: print this help message\n");
@@ -31,8 +110,8 @@ void usage() {
 	printf("\t--driver: use specific driver\n");
 	printf("\t--vendor_id: use specific vendor_id of USB device\n");
 	printf("\t--product_id: use specific product_id of USB device\n");
-	printf("\t--enable_injection: enable the injection feature\n");
-	printf("\t--injection_file: specify the file that contains injection rules\n");
+	printf("\t--enable_injection: enable injection using the default injection.json\n");
+	printf("\t--injection_file: enable injection using the specified rules file\n");
 	printf("\t--enable_customized_config: enable the customized config feature\n");
 	printf("\t--auto_remap_endpoints: enable endpoint remapping when UDC can't use descriptors directly\n");
 	printf("\t--iso_batch_size N: number of isochronous packets per transfer (1-%d, default %d)\n\n",
@@ -424,6 +503,7 @@ int main(int argc, char **argv)
 			break;
 		case 8:
 			injection_file = optarg;
+			injection_enabled = true;
 			break;
 		case 9:
 			customized_config_enabled = true;
@@ -472,6 +552,7 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		ifs.close();
+		print_injection_summary();
 	}
 
 	if (customized_config_enabled) {
