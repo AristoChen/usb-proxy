@@ -1,4 +1,5 @@
 #include <math.h>
+#include <cctype>
 
 #include "misc.h"
 
@@ -27,4 +28,35 @@ int hexToDecimal(int input) {
 		i++;
 	}
 	return output;
+}
+
+// Parse a hex byte string into a byte vector.
+// Accepts continuous ("000a0500") or space-separated ("00 0a 05 00") formats.
+// Returns an empty vector on parse error.
+std::vector<uint8_t> parseHexBytes(const std::string &hex_str)
+{
+	std::vector<uint8_t> result;
+	std::string s;
+
+	for (char c : hex_str) {
+		if (!std::isspace((unsigned char)c))
+			s += c;
+	}
+
+	if (s.size() % 2 != 0)
+		return {};
+
+	auto nibble = [](unsigned char c) -> uint8_t {
+		return c >= 'a' ? c - 'a' + 10 : c >= 'A' ? c - 'A' + 10 : c - '0';
+	};
+
+	for (size_t i = 0; i < s.size(); i += 2) {
+		if (!std::isxdigit((unsigned char)s[i]) ||
+		    !std::isxdigit((unsigned char)s[i + 1]))
+			return {};
+		result.push_back((nibble((unsigned char)s[i]) << 4) |
+				 nibble((unsigned char)s[i + 1]));
+	}
+
+	return result;
 }

@@ -96,6 +96,7 @@ Usage:
     --injection_file: enable injection using the specified rules file
     --auto_remap_endpoints: remap device endpoints to match UDC capabilities (off by default)
     --iso_batch_size N: number of isochronous packets per transfer (1-32, default 8)
+    --inject_socket PATH: enable runtime packet injection via Unix socket
 ```
 - If `device` not specified, `usb-proxy` will use `dummy_udc.0` as default device.
 - If `driver` not specified, `usb-proxy` will use `dummy_udc` as default driver.
@@ -565,3 +566,71 @@ For example
 $ ./usb-proxy --device=fe980000.usb --driver=fe980000.usb --enable_injection
 $ ./usb-proxy --device=fe980000.usb --driver=fe980000.usb --injection_file=myInjectionRules.json
 ```
+
+---
+
+## Dynamic packet injection
+
+Static injection rules (above) are evaluated on every passing packet. Dynamic injection lets you push individual packets into the proxy at runtime from an external process, via a Unix domain socket started with `--inject_socket`:
+
+```shell
+$ ./usb-proxy --device=fe980000.usb --driver=fe980000.usb --inject_socket /tmp/usb-proxy.sock
+```
+
+The socket accepts newline-terminated commands over any number of persistent connections:
+
+```
+INJECT <ep_addr_hex> <hex_bytes>
+```
+
+`ep_addr_hex` is the physical device endpoint address written as hex digits, using the same convention as `injection.json` (e.g. `81` for `0x81`). `hex_bytes` may be continuous (`000a0500`) or space-separated (`00 0a 05 00`).
+
+Each command gets a plain-text response:
+```
+OK
+ERR: <reason>
+```
+
+### Direction
+
+The endpoint address determines which side receives the injected packet:
+
+| Endpoint | Direction | Effect |
+|---|---|---|
+| IN endpoint (e.g. `81`, `82`) | device → host | Host receives a fabricated packet as if the device sent it |
+| OUT endpoint (e.g. `01`, `02`) | host → device | Device receives a fabricated packet as if the host sent it |
+
+### Shell usage
+
+`nc` (`netcat-openbsd`) is pre-installed on Ubuntu. On Debian/Raspberry Pi OS it may need to be installed: `sudo apt install netcat-openbsd`.
+
+```shell
+# Inject a 4-byte HID mouse report to the host (IN endpoint 0x81)
+echo "INJECT 81 00 0a 05 00" | nc -U /tmp/usb-proxy.sock
+
+# Inject a HID output report to the device (OUT endpoint 0x01, e.g. set keyboard LED)
+echo "INJECT 01 02" | nc -U /tmp/usb-proxy.sock
+```
+
+### Python usage
+
+```python
+import socket
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect("/tmp/usb-proxy.sock")
+
+def inject(ep_addr: int, data: bytes) -> str:
+    hex_bytes = data.hex()
+    sock.sendall(f"INJECT {ep_addr:02x} {hex_bytes}\n".encode())
+    return sock.recv(64).decode().strip()
+
+# Inject a mouse report that moves the cursor right
+print(inject(0x81, bytes([0x00, 0x0a, 0x00, 0x00])))
+```
+
+### Notes
+
+- Dynamic injection can be combined with static injection rules: static rules run on every real packet; dynamic injection pushes extra packets that bypass the static rules.
+- Up to 32 packets can be queued per endpoint. `INJECT` returns `ERR: queue full` if the write thread cannot keep up.
+- The socket is removed when the proxy exits cleanly. If the process crashes, the next run will replace the stale socket file automatically.

@@ -1,6 +1,8 @@
 #include <assert.h>
 #include <atomic>
 #include <cstring>
+#include <mutex>
+#include <vector>
 #include <iomanip>
 #include <iostream>
 #include <fstream>
@@ -29,3 +31,6 @@ extern int iso_batch_size;
 
 std::string hexToAscii(std::string input);
 int hexToDecimal(int input);
+std::vector<uint8_t> parseHexBytes(const std::string &hex_str);
+
+extern std::mutex g_endpoint_lifecycle_mutex;

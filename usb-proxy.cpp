@@ -6,6 +6,7 @@
 #include "device-libusb.h"
 #include "proxy.h"
 #include "misc.h"
+#include "dynamic-inject.h"
 
 int verbose_level = 0;
 bool please_stop_ep0 = false;
@@ -114,8 +115,11 @@ void usage() {
 	printf("\t--injection_file: enable injection using the specified rules file\n");
 	printf("\t--enable_customized_config: enable the customized config feature\n");
 	printf("\t--auto_remap_endpoints: enable endpoint remapping when UDC can't use descriptors directly\n");
-	printf("\t--iso_batch_size N: number of isochronous packets per transfer (1-%d, default %d)\n\n",
+	printf("\t--iso_batch_size N: number of isochronous packets per transfer (1-%d, default %d)\n",
 		ISO_BATCH_SIZE_MAX, ISO_BATCH_SIZE_DEFAULT);
+	printf("\t--inject_socket PATH: enable runtime injection via Unix socket (e.g. /tmp/usb-proxy.sock)\n");
+	printf("\t  Usage: echo \"INJECT <ep_hex> <hex_bytes>\" | nc -U PATH\n");
+	printf("\t  Note: ep_hex is the physical device endpoint address (same as injection.json)\n\n");
 	printf("* If `device` not specified, `usb-proxy` will use `dummy_udc.0` as default device.\n");
 	printf("* If `driver` not specified, `usb-proxy` will use `dummy_udc` as default driver.\n");
 	printf("* If both `vendor_id` and `product_id` not specified, `usb-proxy` will connect\n");
@@ -447,6 +451,7 @@ int main(int argc, char **argv)
 	const char *driver = "dummy_udc";
 	int vendor_id = -1;
 	int product_id = -1;
+	std::string inject_socket_path;
 
 	struct sigaction action;
 	memset(&action, 0, sizeof(struct sigaction));
@@ -468,6 +473,7 @@ int main(int argc, char **argv)
 		{"enable_customized_config", no_argument, &lopt, 9},
 		{"auto_remap_endpoints", no_argument, &lopt, 10},
 		{"iso_batch_size", required_argument, &lopt, 11},
+		{"inject_socket", required_argument, &lopt, 12},
 		{0, 0, 0, 0}
 	};
 	while ((opt = getopt_long(argc, argv, optstring, long_options, &loidx)) != -1) {
@@ -519,6 +525,9 @@ int main(int argc, char **argv)
 			if (iso_batch_size > ISO_BATCH_SIZE_MAX)
 				iso_batch_size = ISO_BATCH_SIZE_MAX;
 			printf("Isochronous batch size set to %d\n", iso_batch_size);
+			break;
+		case 12:
+			inject_socket_path = optarg;
 			break;
 
 		default:
@@ -628,7 +637,24 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	DynamicInjector *injector = nullptr;
+	if (!inject_socket_path.empty()) {
+		injector = new DynamicInjector(inject_socket_path);
+		if (!injector->start()) {
+			fprintf(stderr, "Failed to start dynamic injector on %s -- continuing without it\n",
+				inject_socket_path.c_str());
+			delete injector;
+			injector = nullptr;
+		}
+	}
+
 	ep0_loop(fd);
+
+	if (injector) {
+		injector->stop();
+		injector->join();
+		delete injector;
+	}
 
 	close(fd);
 
