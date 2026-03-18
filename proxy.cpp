@@ -1,6 +1,7 @@
 #include <vector>
 #include <algorithm>
 #include <map>
+#include <condition_variable>
 
 #include "host-raw-gadget.h"
 #include "device-libusb.h"
@@ -662,6 +663,12 @@ void printData(struct usb_raw_transfer_io io, __u8 bEndpointAddress, std::string
 	printf("\n");
 }
 
+// Protects per-endpoint data_queue/data_mutex/data_cond/please_stop pointer
+// transitions in terminate_eps phase 3. Held by DynamicInjector before
+// dereferencing any of those pointers, preventing use-after-free during
+// device re-enumeration.
+std::mutex g_endpoint_lifecycle_mutex;
+
 void noop_signal_handler(int) { }
 
 void *ep_loop_write(void *arg) {
@@ -673,6 +680,7 @@ void *ep_loop_write(void *arg) {
 	std::string dir = thread_info.dir;
 	std::deque<usb_raw_transfer_io> *data_queue = thread_info.data_queue;
 	std::mutex *data_mutex = thread_info.data_mutex;
+	std::condition_variable *data_cond = thread_info.data_cond;
 	std::atomic<bool> *please_stop = thread_info.please_stop;
 
 	printf("Start writing thread for EP%02x, thread id(%d)\n",
@@ -686,15 +694,18 @@ void *ep_loop_write(void *arg) {
 	while (!*please_stop && !please_stop_eps) {
 		assert(ep_num != -1);
 
-		data_mutex->lock();
-		if (data_queue->empty()) {
-			data_mutex->unlock();
-			usleep(100);
-			continue;
+		struct usb_raw_transfer_io io;
+		{
+			std::unique_lock<std::mutex> lock(*data_mutex);
+			data_cond->wait_for(lock, std::chrono::milliseconds(5),
+				[&]{ return !data_queue->empty()
+				          || *please_stop
+				          || please_stop_eps.load(); });
+			if (data_queue->empty())
+				continue;
+			io = data_queue->front();
+			data_queue->pop_front();
 		}
-		struct usb_raw_transfer_io io = data_queue->front();
-		data_queue->pop_front();
-		data_mutex->unlock();
 
 		if (verbose_level >= 2)
 			printData(io, ep.bEndpointAddress, transfer_type, dir);
@@ -951,6 +962,7 @@ void process_eps(int fd, int config, int interface, int altsetting) {
 		ep->thread_info.device_bEndpointAddress = ep->device_bEndpointAddress;
 		ep->thread_info.data_queue = new std::deque<usb_raw_transfer_io>;
 		ep->thread_info.data_mutex = new std::mutex;
+		ep->thread_info.data_cond  = new std::condition_variable;
 		ep->thread_info.please_stop = new std::atomic<bool>(false);
 
 		switch (usb_endpoint_type(&ep->endpoint)) {
@@ -1005,6 +1017,8 @@ void terminate_eps(int fd, int config, int interface, int altsetting) {
 		struct raw_gadget_endpoint *ep = &alt->endpoints[i];
 		if (ep->thread_info.please_stop)
 			*ep->thread_info.please_stop = true;
+		if (ep->thread_info.data_cond)
+			ep->thread_info.data_cond->notify_all();
 		if (ep->thread_read)
 			pthread_kill(ep->thread_read, SIGUSR1);
 		if (ep->thread_write)
@@ -1028,12 +1042,18 @@ void terminate_eps(int fd, int config, int interface, int altsetting) {
 		usb_raw_ep_disable(fd, ep->thread_info.ep_num);
 		ep->thread_info.ep_num = -1;
 
-		delete ep->thread_info.data_queue;
-		delete ep->thread_info.data_mutex;
-		delete ep->thread_info.please_stop;
-		ep->thread_info.data_queue = nullptr;
-		ep->thread_info.data_mutex = nullptr;
-		ep->thread_info.please_stop = nullptr;
+		{
+			std::lock_guard<std::mutex> guard(g_endpoint_lifecycle_mutex);
+			delete ep->thread_info.data_queue;
+			ep->thread_info.data_queue = nullptr;
+			delete ep->thread_info.data_cond;
+			ep->thread_info.data_cond = nullptr;
+			delete ep->thread_info.please_stop;
+			ep->thread_info.please_stop = nullptr;
+			// data_mutex deleted last: nothing else may lock it after this point
+			delete ep->thread_info.data_mutex;
+			ep->thread_info.data_mutex = nullptr;
+		}
 	}
 }
 

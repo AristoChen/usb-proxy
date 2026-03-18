@@ -1,6 +1,7 @@
 #include <atomic>
 #include <pthread.h>
 #include <mutex>
+#include <condition_variable>
 #include <deque>
 
 #include "misc.h"
@@ -110,6 +111,7 @@ struct thread_info {
 	std::string			dir;
 	std::deque<usb_raw_transfer_io> *data_queue;
 	std::mutex			*data_mutex;
+	std::condition_variable		*data_cond;
 	std::atomic<bool>		*please_stop;
 };
 
