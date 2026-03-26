@@ -1,55 +1,175 @@
 {
-	"control": {
-		"modify": [
-			{
-				"enable": false,
-				"bRequestType": 0,
-				"bRequest": 0,
-				"wValue": 0,
-				"wIndex": 0,
-				"wLength": 0,
-				"content_pattern": [],
-				"replacement": ""
-			}
-		],
-		"ignore": [
-			{
-				"enable": false,
-				"bRequestType": 0,
-				"bRequest": 0,
-				"wValue": 0,
-				"wIndex": 0,
-				"wLength": 0,
-				"content_pattern": []
-			}
-		],
-		"stall": [
-			{
-				"enable": false,
-				"bRequestType": 0,
-				"bRequest": 0,
-				"wValue": 0,
-				"wIndex": 0,
-				"wLength": 0,
-				"content_pattern": []
-			}
-		]
-	},
-	"int": [
-		{
-			"ep_address": 81,
-			"enable": false,
-			"content_pattern": [],
-			"replacement": ""
-		}
-	],
-	"bulk": [
-		{
-			"ep_address": 81,
-			"enable": false,
-			"content_pattern": [],
-			"replacement": ""
-		}
-	],
-	"isoc": []
+    "control": {
+        "modify": [
+            {
+                "enable": false,
+                "bRequestType": 0,
+                "bRequest": 0,
+                "wValue": 0,
+                "wIndex": 0,
+                "wLength": 0,
+                "content_pattern": [],
+                "replacement": ""
+            }
+        ],
+        "ignore": [
+            {
+                "enable": false,
+                "bRequestType": 0,
+                "bRequest": 0,
+                "wValue": 0,
+                "wIndex": 0,
+                "wLength": 0,
+                "content_pattern": []
+            }
+        ],
+        "stall": [
+            {
+                "enable": false,
+                "bRequestType": 0,
+                "bRequest": 0,
+                "wValue": 0,
+                "wIndex": 0,
+                "wLength": 0,
+                "content_pattern": []
+            }
+        ]
+    },
+    "int": [
+        {
+            "_comment": "=== APPROACH 1: original pattern+replace (unchanged) ===",
+            "_example": "Swap left-click (0x01) and right-click (0x02) on a mouse at EP 0x81",
+            "ep_address": 81,
+            "enable": false,
+            "content_pattern": ["\\x01\\x00\\x00\\x00"],
+            "replacement": "\\x02\\x00\\x00\\x00"
+        },
+        {
+            "_comment": "=== APPROACH 2: declarative operations (no new deps) ===",
+            "_example": "Invert mouse X+Y using negate op (offsets 1 and 2 in 4-byte HID report, int8 axes)",
+            "ep_address": 81,
+            "enable": false,
+            "operations": [
+                { "type": "negate", "offset": 1 },
+                { "type": "negate", "offset": 2 }
+            ]
+        },
+        {
+            "_example": "Invert mouse X+Y for int16 LE axes with report ID (8-byte report: [id, buttons, X_lo, X_hi, Y_lo, Y_hi, scroll, pad])",
+            "ep_address": 82,
+            "enable": false,
+            "operations": [
+                { "type": "negate", "offset": 2, "size": 2 },
+                { "type": "negate", "offset": 4, "size": 2 }
+            ]
+        },
+        {
+            "_example": "Flip left and right mouse buttons via XOR on the button byte",
+            "ep_address": 81,
+            "enable": false,
+            "operations": [
+                { "type": "xor", "offset": 0, "mask": 3 }
+            ]
+        },
+        {
+            "_example": "Swap X and Y axes (e.g. for a 90-degree rotated trackball)",
+            "ep_address": 81,
+            "enable": false,
+            "operations": [
+                { "type": "swap", "offset": 1, "offset_b": 2 }
+            ]
+        },
+        {
+            "_example": "Scale mouse speed to 50% on both axes (int8 axes)",
+            "ep_address": 81,
+            "enable": false,
+            "operations": [
+                { "type": "scale", "offset": 1, "factor": 0.5 },
+                { "type": "scale", "offset": 2, "factor": 0.5 }
+            ]
+        },
+        {
+            "_example": "Scale mouse speed to 50% on both axes (int16 LE axes)",
+            "ep_address": 82,
+            "enable": false,
+            "operations": [
+                { "type": "scale", "offset": 2, "factor": 0.5, "size": 2 },
+                { "type": "scale", "offset": 4, "factor": 0.5, "size": 2 }
+            ]
+        },
+        {
+            "_example": "Cap maximum cursor speed at ±100 on both axes (int16 LE axes)",
+            "ep_address": 82,
+            "enable": false,
+            "operations": [
+                { "type": "clamp", "offset": 2, "min": -100, "max": 100, "size": 2 },
+                { "type": "clamp", "offset": 4, "min": -100, "max": 100, "size": 2 }
+            ]
+        },
+        {
+            "_example": "Clamp mouse movement to [-10, 10] on both axes (speed limiter)",
+            "ep_address": 81,
+            "enable": false,
+            "operations": [
+                { "type": "clamp", "offset": 1, "min": -10, "max": 10 },
+                { "type": "clamp", "offset": 2, "min": -10, "max": 10 }
+            ]
+        },
+        {
+            "_example": "Compose: flip buttons AND invert both axes in one rule",
+            "ep_address": 81,
+            "enable": false,
+            "operations": [
+                { "type": "xor",    "offset": 0, "mask": 3 },
+                { "type": "negate", "offset": 1 },
+                { "type": "negate", "offset": 2 }
+            ]
+        },
+        {
+            "_comment": "=== APPROACH 3: Lua scripting (requires pkg-config + liblua5.4-dev) ===",
+            "_example": "Invert mouse movement via Lua — int8 axes (4-byte report: [buttons, X, Y, scroll])",
+            "ep_address": 81,
+            "enable": false,
+            "script_file": "scripts/mouse_invert.lua"
+        },
+        {
+            "_example": "Apply dead zone + speed cap via Lua — int8 axes",
+            "ep_address": 81,
+            "enable": false,
+            "script_file": "scripts/mouse_speed_limit.lua"
+        },
+        {
+            "_example": "Swap X/Y axes via Lua — int8 axes",
+            "ep_address": 81,
+            "enable": false,
+            "script_file": "scripts/mouse_swap_axes.lua"
+        },
+        {
+            "_example": "Invert mouse movement via Lua — int16 LE axes (8-byte report: [id, buttons, X_lo, X_hi, Y_lo, Y_hi, scroll, pad])",
+            "ep_address": 82,
+            "enable": false,
+            "script_file": "scripts/mouse_invert_int16.lua"
+        },
+        {
+            "_example": "Apply dead zone + speed cap via Lua — int16 LE axes",
+            "ep_address": 82,
+            "enable": false,
+            "script_file": "scripts/mouse_speed_limit_int16.lua"
+        },
+        {
+            "_example": "Swap X/Y axes via Lua — int16 LE axes",
+            "ep_address": 82,
+            "enable": false,
+            "script_file": "scripts/mouse_swap_axes_int16.lua"
+        }
+    ],
+    "bulk": [
+        {
+            "ep_address": 81,
+            "enable": false,
+            "content_pattern": [],
+            "replacement": ""
+        }
+    ],
+    "isoc": []
 }

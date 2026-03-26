@@ -1,8 +1,18 @@
 #include <vector>
+#include <algorithm>
+#include <map>
 
 #include "host-raw-gadget.h"
 #include "device-libusb.h"
 #include "misc.h"
+
+#ifdef HAVE_LUA
+extern "C" {
+#include <lua.h>
+#include <lauxlib.h>
+#include <lualib.h>
+}
+#endif
 
 // UVC Video Streaming interface selectors (USB Video Class spec)
 #define UVC_VS_PROBE_CONTROL		0x01
@@ -279,43 +289,315 @@ static int find_best_compatible_altsetting(struct raw_gadget_interface *iface,
 	return best_alt;
 }
 
-void injection(struct usb_raw_transfer_io &io, Json::Value patterns, std::string replacement_hex, bool &data_modified) {
-	std::string data(io.data, io.inner.length);
-	std::string replacement = hexToAscii(replacement_hex);
-	for (unsigned int j = 0; j < patterns.size(); j++) {
-		std::string pattern_hex = patterns[j].asString();
-		std::string pattern = hexToAscii(pattern_hex);
+// ── Approach 1: declarative per-byte operations ──────────────────────────────
+//
+// Applies the "operations" array from an injection rule to the packet in-place.
+// Operations are applied in order. Offsets are 0-based.
+//
+// Supported types (size=1 is int8 default, size=2 is int16 LE):
+//   negate  { offset [, size] }           – two's-complement negate signed value
+//   scale   { offset, factor [, size] }   – multiply by float, clamp to range
+//   add     { offset, value  [, size] }   – add signed constant, clamp to range
+//   clamp   { offset, min, max [, size] } – clamp signed value to [min, max]
+//   xor     { offset, mask }              – XOR byte with mask (integer)
+//   swap    { offset, offset_b }          – swap two bytes
+//   copy    { offset, dst_offset }        – copy byte to another position
+//   set     { offset, value }             – force byte to unsigned value 0-255
+//
+static void apply_operations(uint8_t *data, int len, const Json::Value &ops)
+{
+	for (unsigned int i = 0; i < ops.size(); i++) {
+		const Json::Value &op = ops[i];
+		std::string type = op.get("type", "").asString();
+		int offset = op.get("offset", -1).asInt();
 
-		std::string::size_type pos = data.find(pattern);
-		while (pos != std::string::npos) {
-			if (data.length() - pattern.length() + replacement.length() > 1023)
-				break;
+		if (type == "negate") {
+			if (offset < 0) continue;
+			int size = op.get("size", 1).asInt();
+			if (size == 2) {
+				if (offset + 1 >= len) continue;
+				int32_t v = (int32_t)(int16_t)((uint16_t)data[offset] |
+				                               ((uint16_t)data[offset + 1] << 8));
+				v = -v;
+				if (v < -32768) v = -32768;
+				if (v > 32767)  v = 32767;
+				uint16_t uv = (uint16_t)(int16_t)v;
+				data[offset]     = (uint8_t)(uv & 0xFF);
+				data[offset + 1] = (uint8_t)(uv >> 8);
+			} else {
+				if (offset >= len) continue;
+				data[offset] = (uint8_t)(-(int8_t)data[offset]);
+			}
 
-			data = data.replace(pos, pattern.length(), replacement);
-			printf("Modified from %s to %s at Index %ld\n", pattern_hex.c_str(), replacement_hex.c_str(), pos);
-			data_modified = true;
+		} else if (type == "scale") {
+			if (offset < 0) continue;
+			double factor = op.get("factor", 1.0).asDouble();
+			int size = op.get("size", 1).asInt();
+			if (size == 2) {
+				if (offset + 1 >= len) continue;
+				int32_t v = (int32_t)(int16_t)((uint16_t)data[offset] |
+				                               ((uint16_t)data[offset + 1] << 8));
+				v = (int32_t)(v * factor);
+				if (v < -32768) v = -32768;
+				if (v > 32767)  v = 32767;
+				uint16_t uv = (uint16_t)(int16_t)v;
+				data[offset]     = (uint8_t)(uv & 0xFF);
+				data[offset + 1] = (uint8_t)(uv >> 8);
+			} else {
+				if (offset >= len) continue;
+				int result = (int)((int8_t)data[offset] * factor);
+				result = std::max(-128, std::min(127, result));
+				data[offset] = (uint8_t)(int8_t)result;
+			}
 
-			pos = data.find(pattern);
-		}
-	}
+		} else if (type == "add") {
+			if (offset < 0) continue;
+			int size = op.get("size", 1).asInt();
+			if (size == 2) {
+				if (offset + 1 >= len) continue;
+				int32_t v = (int32_t)(int16_t)((uint16_t)data[offset] |
+				                               ((uint16_t)data[offset + 1] << 8));
+				v += op.get("value", 0).asInt();
+				if (v < -32768) v = -32768;
+				if (v > 32767)  v = 32767;
+				uint16_t uv = (uint16_t)(int16_t)v;
+				data[offset]     = (uint8_t)(uv & 0xFF);
+				data[offset + 1] = (uint8_t)(uv >> 8);
+			} else {
+				if (offset >= len) continue;
+				int result = (int)(int8_t)data[offset] + op.get("value", 0).asInt();
+				result = std::max(-128, std::min(127, result));
+				data[offset] = (uint8_t)(int8_t)result;
+			}
 
-	if (data_modified) {
-		io.inner.length = data.length();
-		for (size_t j = 0; j < data.length(); j++) {
-			io.data[j] = data[j];
+		} else if (type == "clamp") {
+			if (offset < 0) continue;
+			int size = op.get("size", 1).asInt();
+			if (size == 2) {
+				if (offset + 1 >= len) continue;
+				int32_t v = (int32_t)(int16_t)((uint16_t)data[offset] |
+				                               ((uint16_t)data[offset + 1] << 8));
+				int min_v = op.get("min", -32768).asInt();
+				int max_v = op.get("max",  32767).asInt();
+				v = std::max(min_v, std::min(max_v, (int)v));
+				uint16_t uv = (uint16_t)(int16_t)v;
+				data[offset]     = (uint8_t)(uv & 0xFF);
+				data[offset + 1] = (uint8_t)(uv >> 8);
+			} else {
+				if (offset >= len) continue;
+				int min_v = op.get("min", -128).asInt();
+				int max_v = op.get("max",  127).asInt();
+				int result = std::max(min_v, std::min(max_v, (int)(int8_t)data[offset]));
+				data[offset] = (uint8_t)(int8_t)result;
+			}
+
+		} else if (type == "xor") {
+			if (offset < 0 || offset >= len) continue;
+			data[offset] ^= (uint8_t)op.get("mask", 0).asInt();
+
+		} else if (type == "swap") {
+			int b = op.get("offset_b", -1).asInt();
+			if (offset < 0 || offset >= len) continue;
+			if (b < 0 || b >= len) continue;
+			uint8_t tmp = data[offset];
+			data[offset] = data[b];
+			data[b] = tmp;
+
+		} else if (type == "copy") {
+			int dst = op.get("dst_offset", -1).asInt();
+			if (offset < 0 || offset >= len) continue;
+			if (dst < 0 || dst >= len) continue;
+			data[dst] = data[offset];
+
+		} else if (type == "set") {
+			if (offset < 0 || offset >= len) continue;
+			data[offset] = (uint8_t)op.get("value", 0).asInt();
+
+		} else {
+			printf("apply_operations: unknown op type '%s'\n", type.c_str());
 		}
 	}
 }
 
+// ── Approach 2: Lua scripting ─────────────────────────────────────────────────
+//
+// Each unique script_file gets one lua_State loaded on first use, protected
+// by a per-state mutex (Lua states are not thread-safe).
+//
+// The script must export:
+//   function transform(data, len)  →  data, new_len
+//
+// where `data` is a 1-indexed Lua table of byte values (0-255),
+// `len` is the original packet length, and the function returns the
+// (possibly modified) table and the new length.
+//
+#ifdef HAVE_LUA
+struct LuaRuleState {
+	lua_State *L = nullptr;
+	std::mutex call_mutex;
+};
+
+static std::mutex                          lua_registry_mutex;
+static std::map<std::string, LuaRuleState *> lua_states;
+
+static LuaRuleState *get_lua_state(const std::string &script_file)
+{
+	std::lock_guard<std::mutex> guard(lua_registry_mutex);
+	auto it = lua_states.find(script_file);
+	if (it != lua_states.end())
+		return it->second;
+
+	auto *state = new LuaRuleState();
+	state->L = luaL_newstate();
+	luaL_openlibs(state->L);
+	if (luaL_dofile(state->L, script_file.c_str()) != LUA_OK) {
+		fprintf(stderr, "Lua: failed to load '%s': %s\n",
+			script_file.c_str(), lua_tostring(state->L, -1));
+		lua_close(state->L);
+		state->L = nullptr;
+	} else {
+		printf("Lua: loaded '%s'\n", script_file.c_str());
+	}
+	lua_states[script_file] = state;
+	return state;
+}
+
+static bool apply_lua_transform(const std::string &script_file,
+				uint8_t *data, int &len)
+{
+	LuaRuleState *state = get_lua_state(script_file);
+	if (!state || !state->L)
+		return false;
+
+	std::lock_guard<std::mutex> guard(state->call_mutex);
+	lua_State *L = state->L;
+
+	lua_getglobal(L, "transform");
+	if (!lua_isfunction(L, -1)) {
+		fprintf(stderr, "Lua: '%s' has no 'transform' function\n",
+			script_file.c_str());
+		lua_pop(L, 1);
+		return false;
+	}
+
+	// Build 1-indexed Lua table from packet bytes
+	lua_newtable(L);
+	for (int i = 0; i < len; i++) {
+		lua_pushinteger(L, i + 1);
+		lua_pushinteger(L, data[i]);
+		lua_rawset(L, -3);
+	}
+	lua_pushinteger(L, len);
+
+	// Call transform(data, len) → data, new_len
+	if (lua_pcall(L, 2, 2, 0) != LUA_OK) {
+		fprintf(stderr, "Lua: transform error in '%s': %s\n",
+			script_file.c_str(), lua_tostring(L, -1));
+		lua_pop(L, 1);
+		return false;
+	}
+
+	// Second return value: new length
+	if (!lua_isnumber(L, -1)) {
+		fprintf(stderr, "Lua: '%s' transform must return (table, integer)\n",
+			script_file.c_str());
+		lua_pop(L, 2);
+		return false;
+	}
+	int new_len = (int)lua_tointeger(L, -1);
+	lua_pop(L, 1);
+
+	// First return value: modified byte table
+	if (!lua_istable(L, -1)) {
+		fprintf(stderr, "Lua: '%s' transform must return (table, integer)\n",
+			script_file.c_str());
+		lua_pop(L, 1);
+		return false;
+	}
+	new_len = std::min(new_len, MAX_TRANSFER_SIZE);
+	for (int i = 0; i < new_len; i++) {
+		lua_pushinteger(L, i + 1);
+		lua_rawget(L, -2);
+		data[i] = (uint8_t)(lua_tointeger(L, -1) & 0xFF);
+		lua_pop(L, 1);
+	}
+	lua_pop(L, 1); // pop table
+
+	len = new_len;
+	return true;
+}
+#endif // HAVE_LUA
+
+// Apply the 3-step injection pipeline (pattern+replace, operations, Lua)
+// to the transfer buffer.  Returns true if anything was modified.
+static bool apply_injection_pipeline(struct usb_raw_transfer_io &io,
+				     const Json::Value &rule)
+{
+	bool modified = false;
+
+	// Step 1: pattern match + replacement
+	if (rule.isMember("content_pattern") && rule.isMember("replacement")) {
+		Json::Value patterns = rule["content_pattern"];
+		std::string replacement_hex = rule["replacement"].asString();
+		if (patterns.size() > 0 && !replacement_hex.empty()) {
+			std::string data(io.data, io.inner.length);
+			std::string replacement = hexToAscii(replacement_hex);
+			for (unsigned int j = 0; j < patterns.size(); j++) {
+				std::string pattern_hex = patterns[j].asString();
+				std::string pattern = hexToAscii(pattern_hex);
+
+				std::string::size_type pos = data.find(pattern);
+				while (pos != std::string::npos) {
+					if (data.length() - pattern.length() + replacement.length() > 1023)
+						break;
+					data = data.replace(pos, pattern.length(), replacement);
+					printf("Modified from %s to %s at Index %ld\n",
+						pattern_hex.c_str(), replacement_hex.c_str(), pos);
+					modified = true;
+					pos = data.find(pattern);
+				}
+			}
+			if (modified) {
+				io.inner.length = data.length();
+				for (size_t j = 0; j < data.length(); j++)
+					io.data[j] = data[j];
+			}
+		}
+	}
+
+	// Step 2: declarative operations
+	if (rule.isMember("operations") && rule["operations"].size() > 0) {
+		apply_operations(reinterpret_cast<uint8_t *>(io.data),
+				 (int)io.inner.length,
+				 rule["operations"]);
+		modified = true;
+	}
+
+	// Step 3: Lua transform
+#ifdef HAVE_LUA
+	if (rule.isMember("script_file")) {
+		int len = (int)io.inner.length;
+		if (apply_lua_transform(rule["script_file"].asString(),
+					reinterpret_cast<uint8_t *>(io.data),
+					len)) {
+			io.inner.length = (__u32)len;
+			modified = true;
+		}
+	}
+#endif
+
+	return modified;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 void injection(struct usb_raw_control_event &event, struct usb_raw_transfer_io &io, int &injection_flags) {
-	// This is just a simple injection function for control transfer.
-	std::vector<std::string> injection_type{"modify", "ignore", "stall"};
-	std::string transfer_type = "control";
+	const std::vector<std::string> injection_type{"modify", "ignore", "stall"};
 
 	for (unsigned int i = 0; i < injection_type.size(); i++) {
-		for (unsigned int j = 0; j < injection_config[transfer_type][injection_type[i]].size(); j++) {
-			Json::Value rule = injection_config[transfer_type][injection_type[i]][j];
-			if (rule["enable"].asBool() != true)
+		for (unsigned int j = 0; j < injection_config["control"][injection_type[i]].size(); j++) {
+			Json::Value rule = injection_config["control"][injection_type[i]][j];
+			if (!rule["enable"].asBool())
 				continue;
 
 			if (event.ctrl.bRequestType != hexToDecimal(rule["bRequestType"].asInt()) ||
@@ -327,11 +609,7 @@ void injection(struct usb_raw_control_event &event, struct usb_raw_transfer_io &
 
 			printf("Matched injection rule: %s, index: %d\n", injection_type[i].c_str(), j);
 			if (injection_type[i] == "modify") {
-				Json::Value patterns = rule["content_pattern"];
-				std::string replacement_hex = rule["replacement"].asString();
-				bool data_modified = false;
-
-				injection(io, patterns, replacement_hex, data_modified);
+				apply_injection_pipeline(io, rule);
 				if (!(event.ctrl.bRequestType & USB_DIR_IN))
 					event.ctrl.wLength = io.inner.length;
 			}
@@ -347,21 +625,31 @@ void injection(struct usb_raw_control_event &event, struct usb_raw_transfer_io &
 }
 
 void injection(struct usb_raw_transfer_io &io, __u8 device_ep_address, std::string transfer_type) {
-	// This is just a simple injection function for int and bulk transfer.
 	for (unsigned int i = 0; i < injection_config[transfer_type].size(); i++) {
 		Json::Value rule = injection_config[transfer_type][i];
-		if (rule["enable"].asBool() != true ||
+		if (!rule["enable"].asBool() ||
 		    hexToDecimal(rule["ep_address"].asInt()) != device_ep_address)
 			continue;
 
-		Json::Value patterns = rule["content_pattern"];
-		std::string replacement_hex = rule["replacement"].asString();
-		bool data_modified = false;
+		// Snapshot for before/after logging (copy only incurred when verbose)
+		uint32_t orig_len = io.inner.length;
+		uint8_t orig_data[MAX_TRANSFER_SIZE];
+		if (verbose_level >= 1)
+			memcpy(orig_data, io.data, orig_len);
 
-		injection(io, patterns, replacement_hex, data_modified);
-
-		if (data_modified)
+		if (apply_injection_pipeline(io, rule)) {
+			if (verbose_level >= 1) {
+				printf("Injection[%s EP%02x] before:", transfer_type.c_str(), device_ep_address);
+				for (uint32_t j = 0; j < orig_len; j++)
+					printf(" %02x", orig_data[j]);
+				printf("\n");
+				printf("Injection[%s EP%02x] after: ", transfer_type.c_str(), device_ep_address);
+				for (uint32_t j = 0; j < io.inner.length; j++)
+					printf(" %02x", (uint8_t)io.data[j]);
+				printf("\n");
+			}
 			break;
+		}
 	}
 }
 
