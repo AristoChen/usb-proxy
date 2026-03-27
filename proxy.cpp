@@ -568,10 +568,13 @@ static bool apply_injection_pipeline(struct usb_raw_transfer_io &io,
 
 	// Step 2: declarative operations
 	if (rule.isMember("operations") && rule["operations"].size() > 0) {
+		char pre_data[MAX_TRANSFER_SIZE];
+		memcpy(pre_data, io.data, io.inner.length);
 		apply_operations(reinterpret_cast<uint8_t *>(io.data),
 				 (int)io.inner.length,
 				 rule["operations"]);
-		modified = true;
+		if (memcmp(pre_data, io.data, io.inner.length) != 0)
+			modified = true;
 	}
 
 	// Step 3: Lua transform
