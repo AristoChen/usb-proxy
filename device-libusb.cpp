@@ -465,7 +465,8 @@ int receive_data(uint8_t endpoint, uint8_t attributes, uint16_t maxPacketSize,
 		break;
 	}
 
-	if (result != LIBUSB_SUCCESS) {
+	// An idle IN endpoint times out all the time. That is not an error.
+	if (result != LIBUSB_SUCCESS && result != LIBUSB_ERROR_TIMEOUT) {
 		fprintf(stderr, "Transfer error receiving on EP%02x: %s\n",
 				endpoint, libusb_strerror((libusb_error)result));
 	}

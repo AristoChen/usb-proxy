@@ -652,10 +652,8 @@ int main(int argc, char **argv)
 	if (context && callback_handle != -1) {
 		libusb_hotplug_deregister_callback(context, callback_handle);
 	}
-	if (hotplug_monitor_thread &&
-		pthread_join(hotplug_monitor_thread, NULL)) {
-		fprintf(stderr, "Error join hotplug_monitor_thread\n");
-	}
+	// hotplug_monitor() never returns, so joining it would hang every
+	// exit, including the one after an unplug. Returning from main ends it.
 
 	return 0;
 }

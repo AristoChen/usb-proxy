@@ -859,7 +859,11 @@ void *ep_loop_read(void *arg) {
 					break;
 				}
 
-				if (nbytes >= 0) {
+				// A timeout on an idle endpoint also leaves nbytes at 0.
+				// Only a successful transfer is a real zero-length packet.
+				// Forwarding a timeout would send the host a packet the
+				// device never sent.
+				if (rv == LIBUSB_SUCCESS || nbytes > 0) {
 					memcpy(io.data, data, nbytes);
 					io.inner.ep = ep_num;
 					io.inner.flags = 0;
@@ -887,7 +891,14 @@ void *ep_loop_read(void *arg) {
 			// Passing a larger buffer (e.g. 4096) causes musb-hdrc to report
 			// req->actual = req->length instead of the real frame size, which
 			// then triggers EMSGSIZE (-90) when forwarding to the physical device.
-			if ((ep.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_ISOC)
+			//
+			// Do the same for interrupt OUT. A UDC completes an OUT request
+			// only on a short packet or a full buffer, so a report of exactly
+			// wMaxPacketSize would wait in a 4096-byte request until the rest
+			// of the buffer filled. A HID host that sends one report and then
+			// waits for the device to answer would hang.
+			if ((ep.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_ISOC ||
+			    (ep.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_INT)
 				io.inner.length = usb_endpoint_maxp(&ep);
 			else
 				io.inner.length = sizeof(io.data);
