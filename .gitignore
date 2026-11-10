@@ -1,3 +1,4 @@
 *.o
 usb-proxy
 __pycache__/
+tests/vm/results/
