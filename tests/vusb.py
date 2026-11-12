@@ -11,6 +11,7 @@ import signal
 import subprocess
 import tempfile
 import time
+import types
 
 import usb.backend.libusb1
 import usb.core
@@ -31,6 +32,18 @@ HID_REPORT_DESC = bytes([
     0x95, 0x40, 0x09, 0x01, 0x81, 0x02,
     0x95, 0x40, 0x09, 0x01, 0x91, 0x02,
     0xC0])
+
+# The xfail reason for bulk OUT transfers that end on a full packet.
+FULL_PACKET_BUG = (
+    "known bug: usb-proxy reads bulk OUT data from the host in 4096-byte "
+    "requests, and a UDC completes a request only on a short packet or a full "
+    "buffer, so a transfer that ends on a full packet without a ZLP stays in "
+    "the proxy until more data arrives")
+
+
+class FullPacketHeld(Exception):
+    """Raised only on that bug's signature, so that an xfail with
+    raises=FullPacketHeld can't hide any other failure."""
 
 
 def read(path):
@@ -101,6 +114,12 @@ class Pair:
         wait_for(lambda: not (os.path.exists(self.copy_sysfs) or
                               os.path.exists(self.target_sysfs)),
                  timeout, f"buses {self.copy_bus} and {self.target_bus} to be empty")
+
+    def plug(self, gadget):
+        """Bind gadget as the target and wait until the host has configured
+        it."""
+        gadget.bind(self.target_udc)
+        wait_for(lambda: configured(self.target_sysfs), 10, "the target to be configured")
 
 
 class Gadget:
@@ -237,6 +256,27 @@ class Proxy:
             raise TimeoutError(f"usb-proxy still running {timeout} s after SIGKILL") from None
 
 
+def stop_child(child, proxy):
+    """Stop a child process that overran, or whose test was interrupted,
+    while it waits on the copy. Stopping the proxy unplugs the copy, which
+    completes the I/O the child waits for; whatever happens there, the child
+    is then killed and reaped. Every wait is bounded. Returns what
+    happened, for a failure message."""
+    notes = []
+    try:
+        proxy.stop()
+    except Exception as e:
+        notes.append(f"stopping the proxy failed: {e}")
+    finally:
+        child.kill()
+        try:
+            child.communicate(timeout=30)
+            notes.append("the child was reaped after the proxy stop and SIGKILL")
+        except subprocess.TimeoutExpired:
+            notes.append("the child was still blocked 30 s after the proxy stop and SIGKILL")
+    return "; ".join(notes)
+
+
 def backend():
     """A pyusb backend with a libusb context of its own. Without udevd (as
     in the VM), the system libusb never learns about devices that appear
@@ -260,6 +300,32 @@ def claim(dev, interface):
     if dev.is_kernel_driver_active(interface):
         dev.detach_kernel_driver(interface)
     usb.util.claim_interface(dev, interface)
+
+
+def open_copy(bus, vid, pid, interface=0):
+    """The copy through pyusb, with `interface` claimed: .dev, and .ep_in
+    and .ep_out, the interface's first IN and OUT endpoints."""
+    dev = find_device(bus, vid, pid)
+    claim(dev, interface)
+    intf = dev.get_active_configuration()[(interface, 0)]
+
+    def first(direction):
+        return usb.util.find_descriptor(intf, custom_match=lambda e:
+                                        usb.util.endpoint_direction(e.bEndpointAddress) == direction)
+
+    return types.SimpleNamespace(dev=dev, ep_in=first(usb.util.ENDPOINT_IN),
+                                 ep_out=first(usb.util.ENDPOINT_OUT))
+
+
+def endpoint(sysfs_intf, ep_type, direction):
+    """(bEndpointAddress, bInterval) of an interface's first ep_type
+    ("Interrupt", "Bulk") endpoint going direction ("in", "out"), as the
+    host read them at enumeration."""
+    for ep in sorted(glob.glob(f"{sysfs_intf}/ep_*")):
+        if read(f"{ep}/type") == ep_type and read(f"{ep}/direction") == direction:
+            return (int(read(f"{ep}/bEndpointAddress"), 16),
+                    int(read(f"{ep}/bInterval"), 16))
+    raise RuntimeError(f"no {ep_type} {direction} endpoint in {sysfs_intf}")
 
 
 def read_packets(fd, nbytes, timeout, quiet=0.2):

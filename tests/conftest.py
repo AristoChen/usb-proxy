@@ -6,13 +6,12 @@ import os
 import re
 import signal
 import tempfile
-import types
 
 import pytest
 import usb.util
 
 from vusb import (HID_PID, HID_REPORT_DESC, HID_VID, RESULTS, Gadget, Pair, Proxy,
-                  char_dev, claim, configured, find_device, wait_for)
+                  char_dev, open_copy)
 
 TEST_TIMEOUT = int(os.environ.get("USB_PROXY_TEST_TIMEOUT", "120"))
 
@@ -98,15 +97,16 @@ def start_proxy(request, pair, make_gadget):
 
 
 @pytest.fixture
-def hid_target(pair, make_gadget):
+def hid_target(request, pair, make_gadget):
     """The f_hid target, bound and configured. .hidg is its device side,
     /dev/hidgN: read it for what reached the device, write it to send a
-    report to the host."""
-    gadget = make_gadget(HID_VID, HID_PID, "64-byte HID")
+    report to the host. Parametrize it indirectly with a max_speed, like
+    "full-speed", for a slower target."""
+    gadget = make_gadget(HID_VID, HID_PID, "64-byte HID",
+                         max_speed=getattr(request, "param", None))
     func = gadget.function("hid.usb0", protocol="0", subclass="0",
                            report_length="64", report_desc=HID_REPORT_DESC)
-    gadget.bind(pair.target_udc)
-    wait_for(lambda: configured(pair.target_sysfs), 10, "the target to be configured")
+    pair.plug(gadget)
     gadget.hidg = char_dev(func)
     return gadget
 
@@ -119,17 +119,9 @@ def open_hid(pair, hid_target, start_proxy):
     links = []
 
     def open_link():
-        dev = find_device(pair.copy_bus, HID_VID, HID_PID)
-        claim(dev, 0)
-        intf = dev.get_active_configuration()[(0, 0)]
-        link = types.SimpleNamespace(
-            dev=dev,
-            ep_in=usb.util.find_descriptor(intf, custom_match=lambda e:
-                usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN),
-            ep_out=usb.util.find_descriptor(intf, custom_match=lambda e:
-                usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT),
-            rfd=os.open(hid_target.hidg, os.O_RDONLY | os.O_NONBLOCK),
-            wfd=os.open(hid_target.hidg, os.O_WRONLY))
+        link = open_copy(pair.copy_bus, HID_VID, HID_PID)
+        link.rfd = os.open(hid_target.hidg, os.O_RDONLY | os.O_NONBLOCK)
+        link.wfd = os.open(hid_target.hidg, os.O_WRONLY)
         links.append(link)
         return link
 

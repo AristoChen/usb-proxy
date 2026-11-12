@@ -7,8 +7,7 @@ import signal
 
 import pytest
 
-from vusb import (HID_PID, HID_VID, configured, pattern, read_in, read_packets,
-                  wait_for)
+from vusb import HID_PID, HID_VID, pattern, read_in, read_packets
 
 EXIT_TIMEOUT = 5  # seconds
 
@@ -45,8 +44,7 @@ def test_replug_new_proxy(pair, hid_target, start_proxy, open_hid):
     first.stop()
     pair.wait_empty()
 
-    hid_target.bind(pair.target_udc)
-    wait_for(lambda: configured(pair.target_sysfs), 10, "the target to be configured")
+    pair.plug(hid_target)
     start_proxy(HID_VID, HID_PID)
     hid = open_hid()
 
