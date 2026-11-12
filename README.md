@@ -565,3 +565,16 @@ For example
 $ ./usb-proxy --device=fe980000.usb --driver=fe980000.usb --enable_injection
 $ ./usb-proxy --device=fe980000.usb --driver=fe980000.usb --injection_file=myInjectionRules.json
 ```
+
+---
+
+## Testing
+
+`tests/` holds an end-to-end suite that runs usb-proxy against virtual USB devices (dummy_hcd, raw-gadget and configfs gadgets) inside a QEMU VM, so it needs neither hardware nor root:
+
+```shell
+make
+tests/vm/run.sh
+```
+
+The first run downloads and builds a small Linux kernel, which takes a few minutes. See [tests/README.md](tests/README.md) for what the tests cover, the known bugs they mark as expected failures, and how to run them directly as root.
