@@ -1,0 +1,89 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: build (${{ matrix.lua }} Lua)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        lua: [with, without]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0-dev libjsoncpp-dev pkg-config
+          if [ "${{ matrix.lua }}" = with ]; then
+            sudo apt-get install -y liblua5.4-dev
+          fi
+
+      - name: Build with warnings as errors
+        run: |
+          make CFLAGS="-Wall -Wextra -O2 -Werror" 2>&1 | tee build.log
+          expected=$([ "${{ matrix.lua }}" = with ] && echo enabled || echo disabled)
+          grep -q "Lua scripting: $expected" build.log
+
+  vm-tests:
+    name: tests in a VM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 build-essential flex bison bc curl \
+            pkg-config libelf-dev libusb-1.0-0-dev libjsoncpp-dev liblua5.4-dev \
+            python3-pytest python3-usb iproute2 iputils-ping
+
+      - name: Let the runner use KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || echo "no /dev/kvm: run.sh falls back to TCG"
+
+      - name: Find the test kernel version
+        id: kernel
+        run: echo "version=$(sed -n 's/^KERNEL_VERSION=//p' tests/vm/build-kernel.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the test kernel
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/usb-proxy-vm/kernel
+          key: vm-kernel-${{ steps.kernel.outputs.version }}-${{ hashFiles('tests/vm/build-kernel.sh', 'tests/vm/kernel.config') }}
+
+      - name: Build usb-proxy
+        run: make
+
+      - name: Run the tests in a VM
+        run: tests/vm/run.sh
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: vm-test-results
+          path: |
+            tests/vm/results/junit.xml
+            tests/vm/results/proxy-logs/
+            tests/vm/results/dmesg.txt
+            tests/vm/results/console.log
+          if-no-files-found: warn
